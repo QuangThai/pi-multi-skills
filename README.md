@@ -1,4 +1,4 @@
-# multi-skills
+# pi-multi-skills
 
 Multi-skill invocation extension for [pi coding agent](https://pi.dev).
 
@@ -8,10 +8,10 @@ Use `$skill_name` syntax to reference any installed skill from **anywhere** in y
 
 ```bash
 # From local path
-pi install D:/Personal/multi-skills
+pi install D:/Personal/pi-multi-skills
 
 # Or from GitHub
-pi install git:github.com/<your-username>/multi-skills
+pi install git:github.com/<your-username>/pi-multi-skills
 ```
 
 Then reload pi:
@@ -67,9 +67,11 @@ Dùng $code- [Tab]
 ## Architecture
 
 ```
-multi-skills/
+pi-multi-skills/
 ├── package.json    # Pi package metadata
 ├── index.ts        # Event wiring: input → before_agent_start → turn_end
 ├── resolver.ts     # Skill discovery from all locations
-└── parser.ts       # $skill_name regex parsing
+├── parser.ts       # $skill_name regex parsing
+├── tests/          # Unit tests
+└── tsconfig.json   # TypeScript strict config
 ```
