@@ -4,7 +4,7 @@
  * Parses `$skill_name` references from user input text.
  * Supports:
  *   - $skill_name (standalone)
- *   - Multi-skill: "Dùng $skillA và $skillB để làm X"
+ *   - Multi-skill: "Apply $skillA and $skillB together"
  *   - Escaped: \$\ → literal $
  */
 

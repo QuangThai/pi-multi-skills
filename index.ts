@@ -4,10 +4,10 @@
  * Allows users to reference any installed skill from anywhere in their prompt
  * using $skill_name syntax:
  *
- *   "Vui lòng sử dụng $code-review và $ui-ux-pro-max để review UI này"
+ *   "Apply $code-review and $ui-ux-pro-max to review this UI"
  *
  * The extension:
- *   1. Inline autocomplete: gõ $ + Tab để xem/xuất skill name
+ *   1. Inline autocomplete: type $ + Tab to browse available skills
  *   2. Parses $skill_name references from user input (input event)
  *   3. Resolves skill paths from all locations (global, project, packages)
  *   4. Reads SKILL.md content and auto-injects into system prompt
