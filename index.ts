@@ -9,12 +9,12 @@
  * The extension:
  *   1. Inline autocomplete: type $ + Tab to browse available skills
  *   2. Parses $skill_name references from user input (input event)
- *   3. Resolves skill paths from all locations (global, project, packages)
+ *   3. Resolves skill paths from Pi's loaded /skill:name commands
  *   4. Reads SKILL.md content and auto-injects into system prompt
  *   5. Provides `/skills` and `/skills-search` commands
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { stripFrontmatter, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   buildSkillRegistry,
   formatSkillTable,
@@ -28,11 +28,19 @@ import {
 import { readFileSync } from "node:fs";
 
 // ── In-memory state ──────────────────────────────────────────────
-let skillRegistry: Map<string, SkillInfo> | null = null;
 let pendingSkills: SkillInfo[] = [];
 let skillsInjectedThisTurn = false;
 
 // ── System prompt injection template ─────────────────────────────
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 function buildInjectionBlock(skills: SkillInfo[]): string {
   const parts: string[] = [];
 
@@ -44,11 +52,12 @@ function buildInjectionBlock(skills: SkillInfo[]): string {
       content = `[Unable to read ${skill.name} skill]`;
     }
 
+    const body = stripFrontmatter(content).trim();
+
     parts.push(
-      "<skill name=\"" + skill.name + "\">\n" +
-      "  <description>" + skill.description + "</description>\n" +
-      "  <path>" + skill.dir + "</path>\n" +
-      content + "\n" +
+      "<skill name=\"" + escapeXml(skill.name) + "\" location=\"" + escapeXml(skill.skillMdPath) + "\">\n" +
+      "References are relative to " + skill.dir + ".\n\n" +
+      body + "\n" +
       "</skill>",
     );
   }
@@ -62,9 +71,8 @@ function buildInjectionBlock(skills: SkillInfo[]): string {
     parts.join("\n\n") +
     "\n" +
     "\n" +
-    "When referencing files from these skills, use the <path> shown above.\n" +
-    "When executing scripts from these skills, use the <path> as the working\n" +
-    "directory or prefix paths with the skill directory.\n"
+    "When referencing files from these skills, resolve relative paths against\n" +
+    "the skill directory shown in each block.\n"
   );
 }
 
@@ -72,7 +80,6 @@ function buildInjectionBlock(skills: SkillInfo[]): string {
 export default function (pi: ExtensionAPI) {
   // ── 0. Build registry and register autocomplete on session start ─
   pi.on("session_start", async (_event, ctx) => {
-    skillRegistry = buildSkillRegistry(ctx.cwd);
     pendingSkills = [];
     skillsInjectedThisTurn = false;
 
@@ -86,16 +93,16 @@ export default function (pi: ExtensionAPI) {
 
         // Match $ followed by partial skill name at cursor position
         const match = beforeCursor.match(
-          /(?:^|[^\\])\$([a-z0-9_-]*)$/i,
+          /(?:^|[^\\])\$((?:[a-z][a-z0-9_-]*)?)$/,
         );
         if (!match) {
           return current.getSuggestions(lines, cursorLine, cursorCol, options);
         }
 
         const partial = (match[1] ?? "").toLowerCase();
-        const registry = skillRegistry;
+        const registry = buildSkillRegistry(pi.getCommands());
 
-        if (!registry || registry.size === 0) {
+        if (registry.size === 0) {
           return current.getSuggestions(lines, cursorLine, cursorCol, options);
         }
 
@@ -154,8 +161,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("skills", {
     description: "List all available skills with their $name syntax",
     handler: async (_args, ctx) => {
-      const registry = skillRegistry ?? buildSkillRegistry(ctx.cwd);
-      if (!registry || registry.size === 0) {
+      const registry = buildSkillRegistry(pi.getCommands());
+      if (registry.size === 0) {
         ctx.ui.notify("No skills found.", "warning");
         return;
       }
@@ -175,7 +182,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const registry = skillRegistry ?? buildSkillRegistry(ctx.cwd);
+      const registry = buildSkillRegistry(pi.getCommands());
       const keyword = args.toLowerCase();
       const matches: string[] = [];
 
@@ -213,8 +220,7 @@ export default function (pi: ExtensionAPI) {
       return { action: "continue" };
     }
 
-    const registry = skillRegistry ?? buildSkillRegistry(ctx.cwd);
-    skillRegistry = registry;
+    const registry = buildSkillRegistry(pi.getCommands());
 
     const resolved: SkillInfo[] = [];
     const unresolved: string[] = [];
@@ -267,7 +273,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── 4. Inject skill content into system prompt ─────────────────
-  pi.on("before_agent_start", async (event, ctx) => {
+  pi.on("before_agent_start", async (event) => {
     if (pendingSkills.length === 0) return;
     if (skillsInjectedThisTurn) return;
     skillsInjectedThisTurn = true;

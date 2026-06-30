@@ -3,7 +3,47 @@
   "version": "1.0.0",
   "description": "Reference any installed pi skill from anywhere in your prompt using $skill_name syntax. Supports multi-skill invocation with automatic SKILL.md injection into the system prompt.",
   "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "pi-extension",
+    "agent-skills"
+  ],
+  "homepage": "https://github.com/QuangThai/pi-multi-skills#readme",
+  "bugs": {
+    "url": "https://github.com/QuangThai/pi-multi-skills/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QuangThai/pi-multi-skills.git"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --import tsx --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck",
+    "prepack": "npm run typecheck && npm test"
+  },
+  "files": [
+    "index.ts",
+    "parser.ts",
+    "resolver.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }

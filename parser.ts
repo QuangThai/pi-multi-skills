@@ -9,9 +9,10 @@
  */
 
 /** Regex pattern for $skill_name references */
-// Matches $ followed by lowercase letters, digits, and hyphens
-// Not preceded by \ (escape)
-const SKILL_REF_RE = /(?<!\\)\$([a-z][a-z0-9_-]*)/gi;
+// Matches $ followed by a lowercase skill name (letters, digits, underscores, hyphens)
+// Not preceded by \ (escape). Skill names are lowercase by Pi/Agent Skills convention,
+// so uppercase shell variables like $PATH and $HOME are left alone.
+const SKILL_REF_RE = /(?<!\\)\$([a-z][a-z0-9_-]*)(?![A-Za-z0-9_-])/g;
 
 export interface ParsedRef {
   raw: string;       // Full match including $, e.g. "$skillA"
@@ -80,7 +81,7 @@ export function replaceSkillRefs(
   let result = text;
   for (const { name, marker } of sorted) {
     result = result.replace(
-      new RegExp(`(?<!\\\\)\\$${escapeRegex(name)}\\b`, "gi"),
+      new RegExp(`(?<!\\\\)\\$${escapeRegex(name)}(?![A-Za-z0-9_-])`, "g"),
       marker,
     );
   }

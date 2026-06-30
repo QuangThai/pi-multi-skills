@@ -7,6 +7,12 @@ Reference any installed skill from anywhere in your prompt using `$skill_name` s
 ## Install
 
 ```bash
+pi install npm:pi-multi-skills
+```
+
+Or install directly from GitHub:
+
+```bash
 pi install git:github.com/QuangThai/pi-multi-skills
 ```
 
@@ -66,7 +72,7 @@ Apply $code- [Tab]
 
 | Step | Component | Role |
 |------|-----------|------|
-| 1 | **Resolver** | Scans all skill locations — global (`~/.pi/agent/skills/`, `~/.agents/skills/`), project (`.pi/skills/`), git and npm packages |
+| 1 | **Resolver** | Reads Pi's already-loaded `/skill:name` commands so `$skill_name` respects Pi trust, settings, package filters, and CLI-loaded skills |
 | 2 | **Parser** | Extracts `$skill_name` references from user input using regex with negative lookbehind |
 | 3 | **Injector** | Reads each referenced `SKILL.md` and appends its content to the system prompt before the agent begins |
 | 4 | **Autocomplete** | Registers a `$`-triggered autocomplete provider so the TUI suggests skills as the user types |
@@ -77,8 +83,8 @@ Apply $code- [Tab]
 pi-multi-skills/
 ├── package.json       Pi package metadata
 ├── index.ts           Event wiring — input → before_agent_start → turn_end
-├── resolver.ts        Skill discovery across all locations
+├── resolver.ts        Skill registry from Pi's loaded skill commands
 ├── parser.ts          $skill_name regex parsing and replacement
-├── tests/             Unit tests (24 tests)
+├── tests/             Unit tests (29 tests)
 └── tsconfig.json      TypeScript strict configuration
 ```

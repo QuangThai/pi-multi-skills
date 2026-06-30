@@ -1,119 +1,123 @@
 /**
  * Tests for multi-skills resolver.
  *
- * Run with: node --test tests/resolver.test.mjs
+ * Run with: npm test
  */
 
 import { describe, it, before } from "node:test";
 import { strict as assert } from "node:assert";
-import {
-  mkdtempSync,
-  writeFileSync,
-  mkdirSync,
-  existsSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-} from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
+import {
+  buildSkillRegistry,
+  formatSkillTable,
+  parseFrontmatter,
+} from "../resolver.ts";
 
-// ── Inline the resolver logic for testing ──────────────────────
-
-function parseFrontmatter(content) {
-  const m = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
-  if (!m) return { body: content };
-  const fm = {};
-  for (const line of m[1].split("\n")) {
-    const kv = line.match(/^\s*(\w[\w-]*)\s*:\s*(.*?)\s*$/);
-    if (kv) {
-      let val = kv[2].trim();
-      if (
-        (val.startsWith('"') && val.endsWith('"')) ||
-        (val.startsWith("'") && val.endsWith("'"))
-      ) {
-        val = val.slice(1, -1);
-      }
-      fm[kv[1]] = val;
-    }
-  }
-  return { frontmatter: fm, body: content.slice(m[0].length) };
+function skillCommand({ name, description = "Test skill", path, baseDir, scope = "user" }) {
+  return {
+    name: `skill:${name}`,
+    description,
+    source: "skill",
+    sourceInfo: {
+      path,
+      source: "local",
+      scope,
+      origin: "top-level",
+      baseDir,
+    },
+  };
 }
 
-function scanSkillRoot(root, scope) {
-  const skills = [];
-  if (!existsSync(root)) return skills;
-  for (const entry of readdirSync(root)) {
-    const fp = join(root, entry);
-    let st;
-    try { st = statSync(fp); } catch { continue; }
-    if (st.isDirectory()) {
-      const smd = join(fp, "SKILL.md");
-      if (existsSync(smd)) {
-        try {
-          const content = readFileSync(smd, "utf-8");
-          const { frontmatter } = parseFrontmatter(content);
-          skills.push({
-            name: frontmatter?.name || entry,
-            description: frontmatter?.description || "",
-            dir: fp,
-            skillMdPath: smd,
-            scope,
-          });
-        } catch { /* skip */ }
-      }
-    }
-  }
-  return skills;
+function extensionCommand() {
+  return {
+    name: "skills",
+    description: "List skills",
+    source: "extension",
+    sourceInfo: {
+      path: "<test>",
+      source: "test",
+      scope: "temporary",
+      origin: "top-level",
+    },
+  };
 }
+
+let tmpDir;
+let skillDir;
+let skillFile;
+let flatSkillFile;
+
+before(() => {
+  tmpDir = mkdtempSync(join(tmpdir(), "multi-skills-test-"));
+
+  skillDir = join(tmpDir, "my-skill");
+  mkdirSync(skillDir);
+  skillFile = join(skillDir, "SKILL.md");
+  writeFileSync(
+    skillFile,
+    "---\nname: my-skill\ndescription: My test skill\n---\n\n# My Skill\nDo something.",
+  );
+
+  flatSkillFile = join(tmpDir, "flat-skill.md");
+  writeFileSync(
+    flatSkillFile,
+    "---\nname: flat-skill\ndescription: Flat test skill\n---\n\n# Flat Skill",
+  );
+});
 
 // ────────────────────────────────────────────────────────────────
 
-describe("scanSkillRoot", () => {
-  let tmpDir;
+describe("buildSkillRegistry", () => {
+  it("builds a registry from Pi skill commands", () => {
+    const registry = buildSkillRegistry([
+      extensionCommand(),
+      skillCommand({ name: "my-skill", description: "My test skill", path: skillFile, baseDir: skillDir }),
+    ]);
 
-  before(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "multi-skills-test-"));
-    // Create standard skill dir
-    mkdirSync(join(tmpDir, "my-skill"));
-    writeFileSync(
-      join(tmpDir, "my-skill", "SKILL.md"),
-      "---\nname: my-skill\ndescription: My test skill\n---\n\n# My Skill\nDo something.",
-    );
-    // Create another skill
-    mkdirSync(join(tmpDir, "another"));
-    writeFileSync(
-      join(tmpDir, "another", "SKILL.md"),
-      "---\nname: another\ndescription: Another test skill\n---\n\nDo stuff.",
-    );
-    // Create a dir without SKILL.md (should be skipped)
-    mkdirSync(join(tmpDir, "empty-dir"));
-    // Create a flat .md file (should be skipped by directory scanner)
-    writeFileSync(join(tmpDir, "readme.md"), "# Not a skill");
+    assert.equal(registry.size, 1);
+    assert.equal(registry.get("my-skill")?.description, "My test skill");
+    assert.equal(registry.get("my-skill")?.skillMdPath, skillFile);
+    assert.equal(registry.get("my-skill")?.dir, skillDir);
   });
 
-  it("finds skill directories with SKILL.md", () => {
-    const skills = scanSkillRoot(tmpDir, "user");
-    assert.equal(skills.length, 2);
-    const names = skills.map((s) => s.name).sort();
-    assert.deepEqual(names, ["another", "my-skill"]);
+  it("resolves directory command paths to SKILL.md", () => {
+    const registry = buildSkillRegistry([
+      skillCommand({ name: "my-skill", path: skillDir, baseDir: skillDir }),
+    ]);
+
+    assert.equal(registry.get("my-skill")?.skillMdPath, skillFile);
   });
 
-  it("reads name from frontmatter", () => {
-    const skills = scanSkillRoot(tmpDir, "user");
-    const ms = skills.find((s) => s.name === "my-skill");
-    assert.ok(ms);
-    assert.equal(ms.description, "My test skill");
+  it("supports flat markdown skill paths exposed by Pi", () => {
+    const registry = buildSkillRegistry([
+      skillCommand({ name: "flat-skill", path: flatSkillFile, baseDir: tmpDir, scope: "project" }),
+    ]);
+
+    const skill = registry.get("flat-skill");
+    assert.ok(skill);
+    assert.equal(skill.skillMdPath, flatSkillFile);
+    assert.equal(skill.dir, tmpDir);
+    assert.equal(skill.scope, "project");
   });
 
-  it("returns empty for missing directory", () => {
-    const skills = scanSkillRoot("/nonexistent/path", "user");
-    assert.equal(skills.length, 0);
+  it("keeps the first skill on duplicate names to preserve Pi command order", () => {
+    const registry = buildSkillRegistry([
+      skillCommand({ name: "my-skill", description: "First", path: skillFile, baseDir: skillDir }),
+      skillCommand({ name: "my-skill", description: "Second", path: skillFile, baseDir: skillDir }),
+    ]);
+
+    assert.equal(registry.get("my-skill")?.description, "First");
   });
 
-  it("sets scope correctly", () => {
-    const skills = scanSkillRoot(tmpDir, "package");
-    assert.ok(skills.every((s) => s.scope === "package"));
+  it("skips malformed skill command entries", () => {
+    const registry = buildSkillRegistry([
+      skillCommand({ name: "missing", path: join(tmpDir, "missing.md") }),
+      { ...skillCommand({ name: "bad", path: tmpDir }), name: "bad" },
+    ]);
+
+    assert.equal(registry.size, 0);
   });
 });
 
@@ -133,6 +137,13 @@ describe("parseFrontmatter", () => {
     assert.equal(frontmatter?.name, "quoted");
   });
 
+  it("parses boolean values", () => {
+    const { frontmatter } = parseFrontmatter(
+      "---\ndisable-model-invocation: true\n---\n\nBody",
+    );
+    assert.equal(frontmatter?.["disable-model-invocation"], true);
+  });
+
   it("returns body without frontmatter", () => {
     const { frontmatter, body } = parseFrontmatter(
       "---\nname: test\n---\n\n# Actual content",
@@ -145,5 +156,15 @@ describe("parseFrontmatter", () => {
     const { frontmatter, body } = parseFrontmatter("Just content");
     assert.equal(frontmatter, undefined);
     assert.equal(body, "Just content");
+  });
+});
+
+describe("formatSkillTable", () => {
+  it("formats registered skills with $ syntax", () => {
+    const registry = buildSkillRegistry([
+      skillCommand({ name: "my-skill", description: "My test skill", path: skillFile, baseDir: skillDir }),
+    ]);
+
+    assert.match(formatSkillTable(registry), /\$my-skill\s+My test skill/);
   });
 });

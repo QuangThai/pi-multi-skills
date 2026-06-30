@@ -1,2 +1,5 @@
 .git/
 .gitignore
+.pi/
+node_modules/
+*.log
