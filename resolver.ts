@@ -18,7 +18,7 @@ export interface SkillInfo {
   name: string;
   description: string;
   dir: string;               // Absolute path to skill directory
-  skilMdPath: string;        // Absolute path to SKILL.md
+  skillMdPath: string;       // Absolute path to SKILL.md
   content?: string;          // Cached SKILL.md content
   scope: "user" | "project" | "package";
   frontmatter?: Record<string, unknown>;
@@ -82,6 +82,25 @@ function packageSkillRoots(): string[] {
 }
 
 /**
+ * Read pi.skills entries from a package.json, if present.
+ * Shared helper used by both npm and git package scanners.
+ */
+function readPiSkillsFromPackageJson(pkgPath: string, roots: string[]): void {
+  const pkgJsonPath = join(pkgPath, "package.json");
+  if (!existsSync(pkgJsonPath)) return;
+  try {
+    const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
+    const piSkills = pkgJson.pi?.skills;
+    if (Array.isArray(piSkills)) {
+      for (const skillEntry of piSkills) {
+        const abs = resolve(pkgPath, skillEntry);
+        if (existsSync(abs)) roots.push(abs);
+      }
+    }
+  } catch { /* skip invalid package.json */ }
+}
+
+/**
  * Scan an npm package directory for skills/ subdirectory or pi.skills in package.json
  */
 function scanPackageForSkills(pkgPath: string, roots: string[]): void {
@@ -91,22 +110,7 @@ function scanPackageForSkills(pkgPath: string, roots: string[]): void {
     roots.push(skillsDir);
   }
 
-  // Check package.json for pi.skills entries
-  const pkgJsonPath = join(pkgPath, "package.json");
-  if (existsSync(pkgJsonPath)) {
-    try {
-      const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
-      const piSkills = pkgJson.pi?.skills;
-      if (Array.isArray(piSkills)) {
-        for (const skillEntry of piSkills) {
-          const abs = resolve(pkgPath, skillEntry);
-          if (existsSync(abs)) {
-            roots.push(abs);
-          }
-        }
-      }
-    } catch { /* skip invalid package.json */ }
-  }
+  readPiSkillsFromPackageJson(pkgPath, roots);
 }
 
 /**
@@ -150,22 +154,8 @@ function scanGitReposRecursive(
       roots.push(skillsDir);
     }
 
-    // Check package.json for pi.skills entries
-    const pkgJsonPath = join(fullPath, "package.json");
-    if (existsSync(pkgJsonPath)) {
-      try {
-        const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
-        const piSkills = pkgJson.pi?.skills;
-        if (Array.isArray(piSkills)) {
-          for (const skillEntry of piSkills) {
-            const abs = resolve(fullPath, skillEntry);
-            if (existsSync(abs)) {
-              roots.push(abs);
-            }
-          }
-        }
-      } catch { /* skip */ }
-    }
+    // Check for pi.skills in package.json
+    readPiSkillsFromPackageJson(fullPath, roots);
 
     // Recurse into subdirectories
     scanGitReposRecursive(fullPath, currentDepth + 1, maxDepth, roots);
@@ -255,24 +245,19 @@ function scanSkillRoot(root: string, scope: SkillInfo["scope"]): SkillInfo[] {
 
     // Directory skill: contains SKILL.md
     if (entryStat.isDirectory()) {
-      const skilMdPath = join(fullPath, "SKILL.md");
-      if (existsSync(skilMdPath)) {
+      const skillMdPath = join(fullPath, "SKILL.md");
+      if (existsSync(skillMdPath)) {
         try {
-          const content = readFileSync(skilMdPath, "utf-8");
+          const content = readFileSync(skillMdPath, "utf-8");
           const { frontmatter } = parseFrontmatter(content);
           const name = (frontmatter?.name as string) || entry;
           const description = (frontmatter?.description as string) || "";
-
-          // Validate name per Agent Skills spec
-          if (!/^[a-z][a-z0-9-]{0,63}$/.test(name) && frontmatter?.name) {
-            // Pi allows non-matching names but warns
-          }
 
           skills.push({
             name,
             description,
             dir: fullPath,
-            skilMdPath,
+            skillMdPath,
             content,
             scope,
             frontmatter,
@@ -292,7 +277,7 @@ function scanSkillRoot(root: string, scope: SkillInfo["scope"]): SkillInfo[] {
           name,
           description,
           dir: dirname(fullPath),
-          skilMdPath: fullPath,
+          skillMdPath: fullPath,
           content,
           scope,
           frontmatter,
