@@ -1,0 +1,9 @@
+{
+  "name": "multi-skills",
+  "version": "1.0.0",
+  "description": "Multi-skill invocation for pi coding agent. Use $skill_name syntax to reference any installed skill from anywhere in your prompt.",
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
