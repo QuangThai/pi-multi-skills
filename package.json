@@ -1,6 +1,6 @@
 {
   "name": "pi-multi-skills",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Reference any installed pi skill from anywhere in your prompt using $skill_name syntax. Supports multi-skill invocation with automatic SKILL.md injection into the system prompt.",
   "license": "MIT",
   "keywords": [
@@ -45,6 +45,6 @@
     "extensions": [
       "./index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/QuangThai/pi-multi-skills/main/assets/pi-multi-skills-gallery.png"
+    "image": "https://raw.githubusercontent.com/QuangThai/pi-multi-skills/main/assets/pi-multi-skills-gallery-safe.png"
   }
 }
