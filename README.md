@@ -2,76 +2,83 @@
 
 Multi-skill invocation extension for [pi coding agent](https://pi.dev).
 
-Use `$skill_name` syntax to reference any installed skill from **anywhere** in your prompt — not just at the beginning.
+Reference any installed skill from anywhere in your prompt using `$skill_name` syntax — no need to restrict skill references to the beginning of a message.
 
 ## Install
 
 ```bash
-# From local path
-pi install D:/Personal/pi-multi-skills
-
-# Or from GitHub
-pi install git:github.com/<your-username>/pi-multi-skills
+pi install git:github.com/QuangThai/pi-multi-skills
 ```
 
-Then reload pi:
+Reload the session:
+
 ```bash
 /reload
 ```
 
+Verify installation:
+
+```bash
+/skills
+```
+
 ## Usage
 
-```
-Dùng $code-review và $ui-ux-pro-max để review UI này
+Reference one or more skills inline within any prompt:
+
+```text
+Apply $code-review and $ui-ux-pro-max to review this UI
 ```
 
-Or simply:
+Skills resolve regardless of their position in the message:
 
-```
-$interview-me — hãy phỏng vấn tôi về kiến trúc này
+```text
+Run $karpathy-guidelines on the latest changes, then $interview-me on the architecture
 ```
 
-Multiple skills in one message, anywhere in the text:
+A bare skill reference also works:
 
-```
-Áp dụng $karpathy-guidelines và $code-review cho code mới nhất
+```text
+$interview-me
 ```
 
 ### Autocomplete
 
-Type `$` then press **Tab** to see available skills:
+Press **Tab** after typing `$` to browse available skills:
 
-```
-Dùng $code- [Tab]
+```text
+Apply $code- [Tab]
   ↓
-┌─ $code-change-verification   ─┐
-│ $code-review-and-quality      │
-│ $code-simplification          │
-└───────────────────────────────┘
+┌─ $code-change-verification       ─┐
+│ $code-review-and-quality          │
+│ $code-simplification              │
+└───────────────────────────────────┘
 ```
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `/skills` | List all available skills |
-| `/skills-search <keyword>` | Search skills by keyword |
+| `/skills` | List every installed skill with `$name` syntax |
+| `/skills-search <keyword>` | Search skills by name or description |
 
 ## How it works
 
-1. **Resolver** scans all skill locations (global `~/.pi/agent/skills/`, `~/.agents/skills/`, project `.pi/skills/`, git/npm packages)
-2. **Parser** extracts `$skill_name` references from user input
-3. **Injector** reads SKILL.md and injects content into system prompt before the agent runs
-4. **Autocomplete** provides `$` + Tab suggestions during typing
+| Step | Component | Role |
+|------|-----------|------|
+| 1 | **Resolver** | Scans all skill locations — global (`~/.pi/agent/skills/`, `~/.agents/skills/`), project (`.pi/skills/`), git and npm packages |
+| 2 | **Parser** | Extracts `$skill_name` references from user input using regex with negative lookbehind |
+| 3 | **Injector** | Reads each referenced `SKILL.md` and appends its content to the system prompt before the agent begins |
+| 4 | **Autocomplete** | Registers a `$`-triggered autocomplete provider so the TUI suggests skills as the user types |
 
 ## Architecture
 
 ```
 pi-multi-skills/
-├── package.json    # Pi package metadata
-├── index.ts        # Event wiring: input → before_agent_start → turn_end
-├── resolver.ts     # Skill discovery from all locations
-├── parser.ts       # $skill_name regex parsing
-├── tests/          # Unit tests
-└── tsconfig.json   # TypeScript strict config
+├── package.json       Pi package metadata
+├── index.ts           Event wiring — input → before_agent_start → turn_end
+├── resolver.ts        Skill discovery across all locations
+├── parser.ts          $skill_name regex parsing and replacement
+├── tests/             Unit tests (24 tests)
+└── tsconfig.json      TypeScript strict configuration
 ```

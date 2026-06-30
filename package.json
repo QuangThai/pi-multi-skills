@@ -1,7 +1,7 @@
 {
   "name": "pi-multi-skills",
   "version": "1.0.0",
-  "description": "Multi-skill invocation for pi coding agent. Use $skill_name syntax to reference any installed skill from anywhere in your prompt.",
+  "description": "Reference any installed pi skill from anywhere in your prompt using $skill_name syntax. Supports multi-skill invocation with automatic SKILL.md injection into the system prompt.",
   "license": "MIT",
   "pi": {
     "extensions": ["./index.ts"]
