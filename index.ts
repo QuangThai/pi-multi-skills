@@ -219,18 +219,14 @@ export default function (pi: ExtensionAPI) {
       "info",
     );
 
-    // Build <skill> XML blocks (same format as Pi's native /skill:xxx)
-    const xmlBlocks: string[] = [];
+    // Read all skill file contents (errors skip that skill)
+    interface SkillData { skill: SkillInfo; body: string }
+    const skillData: SkillData[] = [];
     for (const skill of resolved) {
       try {
         const content = readFileSync(skill.skillMdPath, "utf-8");
         const body = stripFrontmatter(content).trim();
-        const block =
-          `<skill name="${skill.name}" location="${skill.skillMdPath}">\n` +
-          `References are relative to ${skill.dir}.\n\n` +
-          `${body}\n` +
-          `</skill>`;
-        xmlBlocks.push(block);
+        skillData.push({ skill, body });
       } catch {
         ctx.ui.notify(
           `Could not read skill file for $${skill.name}`,
@@ -239,7 +235,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (xmlBlocks.length === 0) {
+    if (skillData.length === 0) {
       return { action: "continue" };
     }
 
@@ -248,26 +244,26 @@ export default function (pi: ExtensionAPI) {
       event.text,
       resolved.map((s): SkillReplacement => ({ name: s.name, marker: "" })),
     )
-      .replace(/\\\$/g, "$")
       .replace(/\s{2,}/g, " ")
       .trim();
 
-    // Build ONE <skill> block for Pi's parseSkillBlock (only detects the FIRST block).
-    // For multiple skills, merge all content into one block so ALL skills render
-    // compactly via SkillInvocationMessageComponent: "[skill] name (Ctrl+O)"
+    // Build ONE <skill> block at the message start so Pi's parseSkillBlock
+    // detects it and renders compactly via SkillInvocationMessageComponent.
+    // For multiple skills, merge all into one block (parseSkillBlock's
+    // non-greedy regex only catches the FIRST block).
     let skillBlock: string;
-    if (xmlBlocks.length === 1) {
-      skillBlock = xmlBlocks[0];
+    if (skillData.length === 1) {
+      const { skill, body } = skillData[0];
+      skillBlock =
+        `<skill name="${skill.name}" location="${skill.skillMdPath}">\n` +
+        `References are relative to ${skill.dir}.\n\n` +
+        `${body}\n` +
+        `</skill>`;
     } else {
-      // Multi-skill: merge into one block with first skill's metadata
-      const first = resolved[0];
-      const allNames = resolved.map((s) => s.name).join(", ");
-      const mergedBody = resolved
-        .map((s) => {
-          const content = readFileSync(s.skillMdPath, "utf-8");
-          const body = stripFrontmatter(content).trim();
-          return `## ${s.name}\n\n${body}`;
-        })
+      const allNames = skillData.map((d) => d.skill.name).join(", ");
+      const first = skillData[0].skill;
+      const mergedBody = skillData
+        .map((d) => `## ${d.skill.name}\n\n${d.body}`)
         .join("\n\n---\n\n");
       skillBlock =
         `<skill name="${allNames}" location="${first.skillMdPath}">\n` +
