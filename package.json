@@ -1,6 +1,6 @@
 {
   "name": "pi-multi-skills",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Reference any installed pi skill from anywhere in your prompt using $skill_name syntax. Expands inline to <skill> XML (same format as Pi's native /skill:xxx) — no system prompt injection.",
   "license": "MIT",
   "keywords": [
