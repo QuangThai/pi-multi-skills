@@ -27,6 +27,97 @@ import {
 } from "./parser";
 import { readFileSync } from "node:fs";
 
+// ── Helpers ─────────────────────────────────────────────────────
+/** Regex for $skill_name patterns */
+const SKILL_DISPLAY_RE = /\$[a-z][a-z0-9_-]*/g;
+
+/** Minimal editor interface for the highlight wrapper (avoids pi-tui import) */
+interface InnerEditor {
+  render(width: number): string[];
+  invalidate(): void;
+  handleInput(data: string): void;
+  getText(): string;
+  setText(text: string): void;
+  onSubmit?: ((text: string) => void) | undefined;
+  onChange?: ((text: string) => void) | undefined;
+  borderColor?: ((str: string) => string) | undefined;
+  addToHistory?(text: string): void;
+  insertTextAtCursor?(text: string): void;
+  getExpandedText?(): string;
+  setAutocompleteProvider?(provider: unknown): void;
+  setPaddingX?(padding: number): void;
+  setAutocompleteMaxVisible?(maxVisible: number): void;
+}
+
+/**
+ * Editor wrapper that delegates everything to the inner editor
+ * but post-processes render output to highlight $skill_name with
+ * the current theme's accent color.
+ */
+class SkillHighlightEditor implements InnerEditor {
+  private inner: InnerEditor;
+  private theme: { fg(token: string, text: string): string };
+
+  constructor(
+    inner: InnerEditor,
+    theme: { fg(token: string, text: string): string },
+  ) {
+    this.inner = inner;
+    this.theme = theme;
+
+    // Forward onSubmit / onChange so the app can submit
+    if (inner.onSubmit) {
+      this.onSubmit = inner.onSubmit.bind(inner);
+    }
+    if (inner.onChange) {
+      this.onChange = inner.onChange.bind(inner);
+    }
+  }
+
+  // ── Delegated members ───────────────────────────────────
+  get onSubmit(): ((text: string) => void) | undefined {
+    return this.inner.onSubmit;
+  }
+  set onSubmit(fn: ((text: string) => void) | undefined) {
+    this.inner.onSubmit = fn;
+  }
+  get onChange(): ((text: string) => void) | undefined {
+    return this.inner.onChange;
+  }
+  set onChange(fn: ((text: string) => void) | undefined) {
+    this.inner.onChange = fn;
+  }
+  get borderColor(): ((str: string) => string) | undefined {
+    return this.inner.borderColor;
+  }
+  set borderColor(fn: ((str: string) => string) | undefined) {
+    this.inner.borderColor = fn;
+  }
+
+  // ── Component interface ─────────────────────────────────
+  render(width: number): string[] {
+    const lines = this.inner.render(width);
+    // Highlight $skill_name patterns with accent color in every line
+    return lines.map((line: string) =>
+      line.replace(SKILL_DISPLAY_RE, (match: string) => this.theme.fg("accent", match)),
+    );
+  }
+  invalidate(): void { this.inner.invalidate(); }
+  handleInput(data: string): void { this.inner.handleInput(data); }
+
+  // ── EditorComponent interface ───────────────────────────
+  getText(): string { return this.inner.getText(); }
+  setText(text: string): void { this.inner.setText(text); }
+  addToHistory?(text: string): void { this.inner.addToHistory?.(text); }
+  insertTextAtCursor?(text: string): void { this.inner.insertTextAtCursor?.(text); }
+  getExpandedText?(): string { return this.inner.getExpandedText?.() ?? this.inner.getText(); }
+  setAutocompleteProvider?(provider: unknown): void {
+    this.inner.setAutocompleteProvider?.(provider);
+  }
+  setPaddingX?(padding: number): void { this.inner.setPaddingX?.(padding); }
+  setAutocompleteMaxVisible?(maxVisible: number): void { this.inner.setAutocompleteMaxVisible?.(maxVisible); }
+}
+
 // ── In-memory state ──────────────────────────────────────────────
 let pendingSkills: SkillInfo[] = [];
 let skillsInjectedThisTurn = false;
@@ -78,13 +169,28 @@ function buildInjectionBlock(skills: SkillInfo[]): string {
 
 // ── Extension entry ──────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
-  // ── 0. Build registry and register autocomplete on session start ─
+  // ── 0. Build registry, register autocomplete & editor wrapper ─
   pi.on("session_start", async (_event, ctx) => {
     pendingSkills = [];
     skillsInjectedThisTurn = false;
 
-    // Capture current theme for styling autocomplete skill names
+    // Capture current theme for styling skill names
     const theme = ctx.ui.theme;
+
+    // ── Wrap editor to highlight $skill_name in accent color ──
+    const previousEditor = ctx.ui.getEditorComponent();
+    ctx.ui.setEditorComponent((tui: unknown, editorTheme: unknown, keybindings: unknown) => {
+      const inner: InnerEditor = previousEditor
+        ? (previousEditor(tui as any, editorTheme as any, keybindings as any) as unknown as InnerEditor)
+        : (tui as any).createDefaultEditor?.(editorTheme, keybindings) as unknown as InnerEditor;
+      if (!inner) {
+        // Fallback: if we can't get the editor, return a dummy so pi doesn't crash
+        return previousEditor
+          ? previousEditor(tui as any, editorTheme as any, keybindings as any)
+          : undefined as any;
+      }
+      return new SkillHighlightEditor(inner, theme) as any;
+    });
 
     // ── Register $ autocomplete provider ───────────────────────
     ctx.ui.addAutocompleteProvider((current) => ({
@@ -120,9 +226,10 @@ export default function (pi: ExtensionAPI) {
             const desc = info.description.length > 80
               ? info.description.slice(0, 80) + "..."
               : info.description;
+            // Plain text — SkillHighlightEditor wrapper colors them at render time
             items.push({
               value: `$${name} `,
-              label: theme.fg("accent", `$${name}`),
+              label: `$${name}`,
               description: desc,
             });
           }
