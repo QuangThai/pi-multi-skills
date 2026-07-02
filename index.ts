@@ -83,6 +83,9 @@ export default function (pi: ExtensionAPI) {
     pendingSkills = [];
     skillsInjectedThisTurn = false;
 
+    // Capture current theme for styling autocomplete skill names
+    const theme = ctx.ui.theme;
+
     // ── Register $ autocomplete provider ───────────────────────
     ctx.ui.addAutocompleteProvider((current) => ({
       triggerCharacters: ["$"],
@@ -118,8 +121,8 @@ export default function (pi: ExtensionAPI) {
               ? info.description.slice(0, 80) + "..."
               : info.description;
             items.push({
-              value: `$${name}`,
-              label: `$${name}`,
+              value: `$${name} `,
+              label: theme.fg("accent", `$${name}`),
               description: desc,
             });
           }
