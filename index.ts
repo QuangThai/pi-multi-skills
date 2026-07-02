@@ -38,6 +38,7 @@ interface InnerEditor {
   handleInput(data: string): void;
   getText(): string;
   setText(text: string): void;
+  focused: boolean;
   onSubmit?: ((text: string) => void) | undefined;
   onChange?: ((text: string) => void) | undefined;
   borderColor?: ((str: string) => string) | undefined;
@@ -75,6 +76,12 @@ class SkillHighlightEditor implements InnerEditor {
   }
 
   // ── Delegated members ───────────────────────────────────
+  get focused(): boolean {
+    return this.inner.focused;
+  }
+  set focused(value: boolean) {
+    this.inner.focused = value;
+  }
   get onSubmit(): ((text: string) => void) | undefined {
     return this.inner.onSubmit;
   }
