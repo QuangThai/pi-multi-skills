@@ -4,7 +4,7 @@
  * Simulates the full pipeline:
  *   mock SlashCommandInfo[] → buildSkillRegistry
  *   mock user input → parseSkillRefs
- *   → replaceSkillRefs with <skill> XML blocks
+ *   → prepend <skill> XML blocks, user text after \n\n
  *   → verify output matches Pi's native <skill> format
  */
 
@@ -18,32 +18,24 @@ import { parseSkillRefs, replaceSkillRefs } from "../parser.ts";
 import { stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
 
-// ── Helpers ──────────────────────────────────────────────────────
+// ── Helper: build mock SlashCommandInfo ──────────────────────────
 
 function skillCommand({ name, description = "Test skill", path, baseDir, scope = "user" }) {
   return {
     name: `skill:${name}`,
     description,
     source: "skill",
-    sourceInfo: {
-      path,
-      source: "local",
-      scope,
-      origin: "top-level",
-      baseDir,
-    },
+    sourceInfo: { path, source: "local", scope, origin: "top-level", baseDir },
   };
 }
 
 /**
- * Simulate the extension's inline expansion logic:
- *   parse $skill_name → resolve in registry → read SKILL.md → <skill> XML → replace
+ * Simulate the extension's current expansion logic:
+ *   parse $skill_name → resolve in registry → read SKILL.md
+ *   → remove $refs from text → prepend <skill> XML blocks
+ *   → user text after \n\n
  */
-function expandSkillRefs(
-  text,
-  registry,
-  onUnresolved = () => {},
-) {
+function expandSkillRefs(text, registry, onUnresolved = () => {}) {
   const refs = parseSkillRefs(text);
   if (refs.length === 0) return text;
 
@@ -55,21 +47,38 @@ function expandSkillRefs(
     else unresolved.push(ref.name);
   }
   if (unresolved.length > 0) onUnresolved(unresolved);
+  if (resolved.length === 0) return text;
 
-  const replacements = [];
+  // Build <skill> XML blocks (same format as Pi's native /skill:xxx)
+  const xmlBlocks = [];
   for (const skill of resolved) {
     const content = readFileSync(skill.skillMdPath, "utf-8");
     const body = stripFrontmatter(content).trim();
-    const marker =
+    const block =
       `<skill name="${skill.name}" location="${skill.skillMdPath}">\n` +
       `References are relative to ${skill.dir}.\n\n` +
       `${body}\n` +
       `</skill>`;
-    replacements.push({ name: skill.name, marker });
+    xmlBlocks.push(block);
   }
 
-  return replaceSkillRefs(text, replacements);
+  // Remove all $skill_name refs → clean user text
+  // (uses replaceSkillRefs with empty markers, then handles \$ and whitespace)
+  const userText = replaceSkillRefs(
+    text,
+    resolved.map((s) => ({ name: s.name, marker: "" })),
+  )
+    .replace(/\\\$/g, "$")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  // Prepend <skill> blocks at START so Pi's parseSkillBlock detects them
+  // and renders compactly: "[skill] name (Ctrl+O to expand)"
+  const skillBlock = xmlBlocks.join("\n\n");
+  return userText ? `${skillBlock}\n\n${userText}` : skillBlock;
 }
+
+// ── Test fixtures ────────────────────────────────────────────────
 
 let tmpDir;
 let skillADir, skillAFile;
@@ -87,7 +96,7 @@ before(() => {
     [
       "---",
       "name: code-review",
-      "description: Code review skill for reviewing pull requests",
+      "description: Code review skill",
       "---",
       "",
       "# Code Review",
@@ -125,184 +134,152 @@ before(() => {
 
 // ── Tests ────────────────────────────────────────────────────────
 
-describe("E2E: $skill_name expansion → <skill> XML", () => {
-  it("expands a single $skill_name reference at the start of text", () => {
+describe("E2E: $skill_name expansion → <skill> XML at start", () => {
+  it("bare $code-review → <skill> XML only (no user text)", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
     const result = expandSkillRefs("$code-review", registry);
 
-    // Must contain the skill XML block - note: tag has name AND location attributes
+    // Must start with <skill> tag
     assert.match(result, /^<skill name="code-review" location="/);
-    assert.match(result, /location="[^"]+code-review[\\/]SKILL\.md"/);
     assert.match(result, /References are relative to/);
     assert.match(result, /# Code Review/);
     assert.match(result, /Correctness/);
     assert.match(result, /Security/);
     assert.match(result, /<\/skill>$/);
+
+    // No trailing \n\n (userText is empty for bare reference)
+    assert.doesNotMatch(result, /<\/skill>\n\n$/);
   });
 
-  it("expands a single $skill_name reference inline in text", () => {
+  it("inline $code-review → <skill> at start, user text after \\n\\n", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
     const input = "Please apply $code-review to review this UI";
     const result = expandSkillRefs(input, registry);
 
-    // Original text preserved around the skill block
-    assert.ok(result.startsWith("Please apply "));
-    assert.ok(result.endsWith(" to review this UI"));
+    // <skill> block is at the START (so Pi's parseSkillBlock detects it)
+    assert.match(result, /^<skill name="code-review"/);
 
-    // Skill block present inline
-    assert.match(result, /<skill name="code-review"/);
-    assert.match(result, /<\/skill>/);
+    // User text preserved after \n\n (with \$ref removed, whitespace collapsed)
+    assert.match(result, /\n\nPlease apply to review this UI$/);
 
-    // The $code-review reference is gone, replaced by XML
+    // No \$code-review remains
     assert.doesNotMatch(result, /\$code-review/);
   });
 
-  it("expands multiple $skill_name references in the same message", () => {
+  it("$code-review at start of text → <skill> + user text after \\n\\n", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
-      skillCommand({
-        name: "reference-docs",
-        path: skillBFile,
-        baseDir: skillBDir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
+    ]);
+
+    const input = "$code-review analyze this code";
+    const result = expandSkillRefs(input, registry);
+
+    assert.match(result, /^<skill name="code-review"/);
+    assert.match(result, /\n\nanalyze this code$/);
+  });
+
+  it("multiple $skill_name refs → all <skill> blocks at start", () => {
+    const registry = buildSkillRegistry([
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
+      skillCommand({ name: "reference-docs", path: skillBFile, baseDir: skillBDir }),
     ]);
 
     const input = "$code-review and $reference-docs";
     const result = expandSkillRefs(input, registry);
 
-    // Both skill blocks present
-    assert.match(result, /<skill name="code-review"/);
+    // Both <skill> blocks at start
+    assert.match(result, /^<skill name="code-review"/);
     assert.match(result, /<skill name="reference-docs"/);
     assert.match(result, /# Code Review/);
     assert.match(result, /# Reference Docs/);
 
-    // Separator preserved between the two blocks
-    assert.match(result, /<\/skill>\s+and\s+<skill/);
+    // User text after all skill blocks
+    assert.match(result, /\n\nand$/);
   });
 
-  it("expands multiple inline $ references with surrounding text", () => {
+  it("multiple inline $ refs → all <skill> at start, clean user text after", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
-      skillCommand({
-        name: "reference-docs",
-        path: skillBFile,
-        baseDir: skillBDir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
+      skillCommand({ name: "reference-docs", path: skillBFile, baseDir: skillBDir }),
     ]);
 
     const input = "Run $code-review first, then $reference-docs for API docs";
     const result = expandSkillRefs(input, registry);
 
-    assert.ok(result.startsWith("Run "));
-    assert.match(result, / first, then /);
-    assert.ok(result.endsWith(" for API docs"));
-    assert.match(result, /<skill name="code-review"/);
+    // Both <skill> blocks at start
+    assert.match(result, /^<skill name="code-review"/);
     assert.match(result, /<skill name="reference-docs"/);
+
+    // User text cleaned of $refs, whitespace collapsed
+    assert.match(result, /\n\nRun first, then for API docs$/);
     assert.doesNotMatch(result, /\$code-review/);
     assert.doesNotMatch(result, /\$reference-docs/);
   });
 
-  it("preserves text with no $skill references unchanged", () => {
+  it("preserves text with no $ references unchanged", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
-    const input = "Just normal text without any skill references";
-    const result = expandSkillRefs(input, registry);
-
-    assert.equal(result, input);
+    assert.equal(expandSkillRefs("Just normal text", registry), "Just normal text");
   });
 
   it("ignores uppercase shell variables like $PATH and $HOME", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
-    const input = "Using $PATH and $HOME environment variables";
-    const result = expandSkillRefs(input, registry);
-
-    // Should not be modified since $PATH/$HOME don't match lowercase pattern
-    assert.equal(result, input);
+    const result = expandSkillRefs("Using $PATH and $HOME", registry);
+    assert.equal(result, "Using $PATH and $HOME");
   });
 
   it("preserves escaped \\$ as literal dollar sign", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
     const input = "Price is \\$100, not $code-review";
     const result = expandSkillRefs(input, registry);
 
-    // $code-review should be expanded, \\$100 becomes $100
-    assert.ok(result.startsWith("Price is $100, not "));
-    assert.match(result, /<skill name="code-review"/);
+    // $code-review expanded, \\$100 → $100
+    assert.match(result, /^<skill name="code-review"/);
+    assert.match(result, /\n\nPrice is \$100, not$/);
   });
 
-  it("reports unresolved skills but keeps $ references as-is", () => {
+  it("unresolved skills keep $ references as-is", () => {
     const registry = buildSkillRegistry([]);
-
     const unresolvedSpy = [];
-    const input = "Use $non-existent-skill for this task";
+
+    const input = "Use $unknown-skill for this";
     const result = expandSkillRefs(input, registry, (u) => unresolvedSpy.push(...u));
 
-    // $ reference preserved as-is since skill doesn't exist
-    assert.equal(result, input);
-    assert.deepEqual(unresolvedSpy, ["non-existent-skill"]);
+    assert.equal(result, input); // unchanged
+    assert.deepEqual(unresolvedSpy, ["unknown-skill"]);
   });
 
-  it("handles deduplication: same $skill_name used twice", () => {
+  it("same $skill_name used twice → one <skill> block, refs removed from user text", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
     const input = "$code-review is great, $code-review is thorough";
     const result = expandSkillRefs(input, registry);
 
-    // Both occurrences replaced
+    // Only ONE <skill> block (deduped by name)
     const occurrences = result.match(/<skill name="code-review"/g);
-    assert.equal(occurrences.length, 2);
+    assert.equal(occurrences.length, 1);
+
+    // Both $code-review removed from user text
+    assert.match(result, /\n\nis great, is thorough$/);
   });
 
-  it("handles overlapping skill names (longest match wins)", () => {
-    // Create skills with overlapping names
+  it("overlapping skill names (longest match wins)", () => {
     const shortDir = mkdtempSync(join(tmpdir(), "multi-skills-short-"));
     const shortFile = join(shortDir, "SKILL.md");
     writeFileSync(shortFile, "---\nname: code\ndescription: Code skill\n---\n\n# Code");
@@ -318,42 +295,32 @@ describe("E2E: $skill_name expansion → <skill> XML", () => {
 
     const result = expandSkillRefs("Use $code-review and $code", registry);
 
-    assert.match(result, /<skill name="code-review"/);
+    assert.match(result, /^<skill name="code-review"/);
     assert.match(result, /<skill name="code"/);
     assert.match(result, /# Code Review/);
     assert.match(result, /# Code/);
+    assert.match(result, /\n\nUse and$/);
   });
 
-  it("produces XML format matching Pi's native _expandSkillCommand", () => {
+  it("XML format matches Pi's native _expandSkillCommand exactly", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
     const result = expandSkillRefs("$code-review", registry);
 
-    // Verify the exact XML structure matches what Pi's _expandSkillCommand produces.
-    // Pi's native format (from agent-session.js):
+    // Pi's native format (agent-session.js):
     //   `<skill name="${name}" location="${path}">\nReferences are relative to ${baseDir}.\n\n${body}\n</skill>`
     assert.match(result, /^<skill name="code-review" location="/);
     assert.match(result, /">\nReferences are relative to /);
     assert.match(result, /\n\n# Code Review/);
-    assert.match(result, /<\/skill>$/);
-
-    // Verify the body content
     assert.match(result, /Correctness/);
     assert.match(result, /Security/);
+    assert.match(result, /<\/skill>$/);
 
-    // Count opening tags (should be exactly 1)
-    const openTags = result.match(/<skill name=/g);
-    assert.equal(openTags.length, 1);
-
-    // Count closing tags
-    const closeTags = result.match(/<\/skill>/g);
-    assert.equal(closeTags.length, 1);
+    // Exactly one skill block
+    assert.equal(result.match(/<skill name=/g).length, 1);
+    assert.equal(result.match(/<\/skill>/g).length, 1);
   });
 });
 
@@ -368,7 +335,7 @@ describe("E2E: /skills command registry", () => {
     assert.equal(registry.size, 2);
     assert.ok(registry.has("code-review"));
     assert.ok(registry.has("reference-docs"));
-    assert.ok(!registry.has("skills")); // extension commands filtered out
+    assert.ok(!registry.has("skills"));
   });
 
   it("handles skill resolution with dir → SKILL.md lookup", () => {
@@ -383,30 +350,45 @@ describe("E2E: /skills command registry", () => {
   });
 });
 
-describe("E2E: XML output compatibility with Pi's parseSkillBlock", () => {
-  it("XML skill block is parseable by Pi's parseSkillBlock regex", () => {
-    // Verify the format matches Pi's native <skill> XML that parseSkillBlock expects.
-    // Pi's parseSkillBlock (from agent-session.js):
-    //   /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/
-
+describe("E2E: parseSkillBlock compatibility (Pi's compact rendering)", () => {
+  it("bare $code-review output matches parseSkillBlock regex", () => {
     const registry = buildSkillRegistry([
-      skillCommand({
-        name: "code-review",
-        path: skillAFile,
-        baseDir: skillADir,
-      }),
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
     ]);
 
     const result = expandSkillRefs("$code-review", registry);
 
-    // Must match Pi's parseSkillBlock regex
-    const parseRegex = /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/;
+    // Pi's parseSkillBlock (agent-session.js):
+    //   /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/
+    const parseRegex =
+      /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/;
     const match = result.match(parseRegex);
-    assert.ok(match, `Output must match Pi's parseSkillBlock regex.\nFirst 200 chars: ${result.slice(0, 200)}`);
+    assert.ok(match, `Must match Pi's parseSkillBlock.\nFirst 200 chars: ${result.slice(0, 200)}`);
 
-    assert.equal(match[1], "code-review");                            // skill name
-    assert.ok(match[2].endsWith("SKILL.md"));                         // skill location
-    assert.ok(match[3].includes("# Code Review"));                     // body content
-    assert.equal(match[4], undefined);                                 // no args
+    assert.equal(match[1], "code-review");
+    assert.ok(match[2].endsWith("SKILL.md"));
+    assert.ok(match[3].includes("# Code Review"));
+    assert.equal(match[4], undefined); // no user text for bare ref
+  });
+
+  it("inline $code-reference output matches parseSkillBlock with userMessage", () => {
+    const registry = buildSkillRegistry([
+      skillCommand({ name: "code-review", path: skillAFile, baseDir: skillADir }),
+    ]);
+
+    const result = expandSkillRefs("Please apply $code-review to this UI", registry);
+
+    // Must match with userMessage captured
+    const parseRegex =
+      /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/;
+    const match = result.match(parseRegex);
+    assert.ok(match, `Inline must match parseSkillBlock.\nFirst 200 chars: ${result.slice(0, 200)}`);
+
+    assert.equal(match[1], "code-review");
+    assert.ok(match[3].includes("# Code Review"));
+
+    // userMessage captured (for Pi's separate rendering)
+    assert.ok(match[4]);
+    assert.match(match[4], /Please apply to this UI/);
   });
 });

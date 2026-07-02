@@ -219,20 +219,18 @@ export default function (pi: ExtensionAPI) {
       "info",
     );
 
-    // Expand: replace $skill_name → <skill name="..." location="...">...</skill>
-    // This produces the same XML format as Pi's native /skill:xxx expansion,
-    // but works inline at any position in the text, not just at the start.
-    const replacements: SkillReplacement[] = [];
+    // Build <skill> XML blocks (same format as Pi's native /skill:xxx)
+    const xmlBlocks: string[] = [];
     for (const skill of resolved) {
       try {
         const content = readFileSync(skill.skillMdPath, "utf-8");
         const body = stripFrontmatter(content).trim();
-        const marker =
+        const block =
           `<skill name="${skill.name}" location="${skill.skillMdPath}">\n` +
           `References are relative to ${skill.dir}.\n\n` +
           `${body}\n` +
           `</skill>`;
-        replacements.push({ name: skill.name, marker });
+        xmlBlocks.push(block);
       } catch {
         ctx.ui.notify(
           `Could not read skill file for $${skill.name}`,
@@ -241,11 +239,26 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (replacements.length === 0) {
+    if (xmlBlocks.length === 0) {
       return { action: "continue" };
     }
 
-    const transformed = replaceSkillRefs(event.text, replacements);
+    // Remove all $skill_name references from the text to get clean user text.
+    // Then prepend <skill> blocks at the START so Pi's parseSkillBlock detects them
+    // and renders compactly via SkillInvocationMessageComponent:
+    //   "[skill] name (Ctrl+O to expand)"
+    const userText = replaceSkillRefs(
+      event.text,
+      resolved.map((s): SkillReplacement => ({ name: s.name, marker: "" })),
+    )
+      .replace(/\\\$/g, "$")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+    const skillBlock = xmlBlocks.join("\n\n");
+    const transformed = userText
+      ? `${skillBlock}\n\n${userText}`
+      : skillBlock;
 
     return { action: "transform", text: transformed };
   });
