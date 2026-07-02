@@ -244,9 +244,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Remove all $skill_name references from the text to get clean user text.
-    // Then prepend <skill> blocks at the START so Pi's parseSkillBlock detects them
-    // and renders compactly via SkillInvocationMessageComponent:
-    //   "[skill] name (Ctrl+O to expand)"
     const userText = replaceSkillRefs(
       event.text,
       resolved.map((s): SkillReplacement => ({ name: s.name, marker: "" })),
@@ -255,7 +252,30 @@ export default function (pi: ExtensionAPI) {
       .replace(/\s{2,}/g, " ")
       .trim();
 
-    const skillBlock = xmlBlocks.join("\n\n");
+    // Build ONE <skill> block for Pi's parseSkillBlock (only detects the FIRST block).
+    // For multiple skills, merge all content into one block so ALL skills render
+    // compactly via SkillInvocationMessageComponent: "[skill] name (Ctrl+O)"
+    let skillBlock: string;
+    if (xmlBlocks.length === 1) {
+      skillBlock = xmlBlocks[0];
+    } else {
+      // Multi-skill: merge into one block with first skill's metadata
+      const first = resolved[0];
+      const allNames = resolved.map((s) => s.name).join(", ");
+      const mergedBody = resolved
+        .map((s) => {
+          const content = readFileSync(s.skillMdPath, "utf-8");
+          const body = stripFrontmatter(content).trim();
+          return `## ${s.name}\n\n${body}`;
+        })
+        .join("\n\n---\n\n");
+      skillBlock =
+        `<skill name="${allNames}" location="${first.skillMdPath}">\n` +
+        `References are relative to ${first.dir}.\n\n` +
+        `${mergedBody}\n` +
+        `</skill>`;
+    }
+
     const transformed = userText
       ? `${skillBlock}\n\n${userText}`
       : skillBlock;
