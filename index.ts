@@ -12,6 +12,7 @@
  *   3. Resolves skill paths from Pi's loaded /skill:name commands
  *   4. Reads SKILL.md content and auto-injects into system prompt
  *   5. Provides `/skills` and `/skills-search` commands
+ *   6. Shows a colored widget with detected skills above the editor
  */
 
 import { stripFrontmatter, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -26,12 +27,6 @@ import {
   type SkillReplacement,
 } from "./parser";
 import { readFileSync } from "node:fs";
-
-// ── Helpers ─────────────────────────────────────────────────────
-/** Strip ANSI escape codes from a string (for clean parsing of colored text) */
-function stripAnsi(str: string): string {
-  return str.replace(/\x1b\[[0-9;]*m/g, "");
-}
 
 // ── In-memory state ──────────────────────────────────────────────
 let pendingSkills: SkillInfo[] = [];
@@ -84,7 +79,6 @@ function buildInjectionBlock(skills: SkillInfo[]): string {
 
 // ── Extension entry ──────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
-  // ── 0. Build registry and register autocomplete on session start ─
   pi.on("session_start", async (_event, ctx) => {
     pendingSkills = [];
     skillsInjectedThisTurn = false;
@@ -98,7 +92,7 @@ export default function (pi: ExtensionAPI) {
 
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const line = lines[cursorLine] ?? "";
-        const beforeCursor = stripAnsi(line.slice(0, cursorCol));
+        const beforeCursor = line.slice(0, cursorCol);
 
         // Match $ followed by partial skill name at cursor position
         const match = beforeCursor.match(
@@ -126,11 +120,11 @@ export default function (pi: ExtensionAPI) {
             const desc = info.description.length > 80
               ? info.description.slice(0, 80) + "..."
               : info.description;
-            // ANSI-colored for editor display + dropdown; stripAnsi cleans for parsing
-            const colored = theme.fg("accent", `$${name}`);
+            // Plain text value (editor text buffer) + trailing space for seamless typing
+            // Colored label for autocomplete dropdown display
             items.push({
-              value: `${colored} `,
-              label: colored,
+              value: `$${name} `,
+              label: theme.fg("accent", `$${name}`),
               description: desc,
             });
           }
@@ -147,27 +141,13 @@ export default function (pi: ExtensionAPI) {
       },
 
       applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-        // Strip ANSI from both the value and prefix so the built-in
-        // applyCompletion calculates the correct cursor position
-        // (ANSI codes are zero-width visually but count as bytes)
-        const plainItem = { ...item, value: stripAnsi(item.value) };
-        const plainPrefix = stripAnsi(prefix);
-
-        const result = current.applyCompletion(
+        return current.applyCompletion(
           lines,
           cursorLine,
           cursorCol,
-          plainItem,
-          plainPrefix,
+          item,
+          prefix,
         );
-
-        // Now inject the ANSI-colored value into the result line
-        const resultLine = result.lines[cursorLine];
-        const plainValue = plainItem.value;
-        const coloredValue = item.value;
-        result.lines[cursorLine] = resultLine.replace(plainValue, coloredValue);
-
-        return result;
       },
 
       shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
@@ -236,22 +216,20 @@ export default function (pi: ExtensionAPI) {
 
   // ── 3. Intercept user input, parse $skill_name references ──────
   pi.on("input", async (event, ctx) => {
-    if (!event.text) {
+    if (!event.text || !event.text.includes("$")) {
+      // Clear skill widget when no $ references
+      ctx.ui.setWidget("multi-skills", undefined);
       return { action: "continue" };
     }
 
-    // Strip ANSI color codes injected by autocomplete before parsing
-    const cleanText = stripAnsi(event.text);
-    if (!cleanText.includes("$")) {
-      return { action: "continue" };
-    }
-
-    const refs = parseSkillRefs(cleanText);
+    const refs = parseSkillRefs(event.text);
     if (refs.length === 0) {
+      ctx.ui.setWidget("multi-skills", undefined);
       return { action: "continue" };
     }
 
     const registry = buildSkillRegistry(pi.getCommands());
+    const theme = ctx.ui.theme;
 
     const resolved: SkillInfo[] = [];
     const unresolved: string[] = [];
@@ -265,21 +243,26 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (resolved.length === 0) {
-      if (unresolved.length > 0) {
-        ctx.ui.notify(
-          `Unknown skills: ${unresolved.join(", ")}. Use /skills to see available skills.`,
-          "warning",
-        );
-      }
-      return { action: "continue" };
+    // Update widget to show detected skills with theme colors
+    if (resolved.length > 0) {
+      const coloredSkills = resolved
+        .map((s) => theme.fg("accent", `$${s.name}`))
+        .join("  ");
+      ctx.ui.setWidget("multi-skills", [
+        theme.fg("dim", "Skills: ") + coloredSkills,
+      ]);
     }
 
     if (unresolved.length > 0) {
       ctx.ui.notify(
-        `Unknown skills: ${unresolved.join(", ")}. They will be skipped.`,
+        `Unknown skills: ${unresolved.join(", ")}. Use /skills to see available skills.`,
         "warning",
       );
+    }
+
+    if (resolved.length === 0) {
+      ctx.ui.setWidget("multi-skills", undefined);
+      return { action: "continue" };
     }
 
     pendingSkills = resolved;
@@ -291,11 +274,8 @@ export default function (pi: ExtensionAPI) {
     );
 
     // Transform: replace $skill_name → [skill: name] markers
-    // replaceSkillRefs sorts by name length internally to prevent
-    // partial matches (e.g. $code matched inside $code-review).
-    // Use cleanText (stripped of ANSI codes) for replacement.
     const transformed = replaceSkillRefs(
-      cleanText,
+      event.text,
       resolved.map(
         (s): SkillReplacement => ({ name: s.name, marker: `[skill: ${s.name}]` }),
       ),
