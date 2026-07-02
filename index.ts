@@ -28,101 +28,9 @@ import {
 import { readFileSync } from "node:fs";
 
 // ── Helpers ─────────────────────────────────────────────────────
-/** Regex for $skill_name patterns */
-const SKILL_DISPLAY_RE = /\$[a-z][a-z0-9_-]*/g;
-
-/** Minimal editor interface for the highlight wrapper (avoids pi-tui import) */
-interface InnerEditor {
-  render(width: number): string[];
-  invalidate(): void;
-  handleInput(data: string): void;
-  getText(): string;
-  setText(text: string): void;
-  focused: boolean;
-  onSubmit?: ((text: string) => void) | undefined;
-  onChange?: ((text: string) => void) | undefined;
-  borderColor?: ((str: string) => string) | undefined;
-  addToHistory?(text: string): void;
-  insertTextAtCursor?(text: string): void;
-  getExpandedText?(): string;
-  setAutocompleteProvider?(provider: unknown): void;
-  setPaddingX?(padding: number): void;
-  setAutocompleteMaxVisible?(maxVisible: number): void;
-}
-
-/**
- * Editor wrapper that delegates everything to the inner editor
- * but post-processes render output to highlight $skill_name with
- * the current theme's accent color.
- */
-class SkillHighlightEditor implements InnerEditor {
-  private inner: InnerEditor;
-  private theme: { fg(token: string, text: string): string };
-
-  constructor(
-    inner: InnerEditor,
-    theme: { fg(token: string, text: string): string },
-  ) {
-    this.inner = inner;
-    this.theme = theme;
-
-    // Forward onSubmit / onChange so the app can submit
-    if (inner.onSubmit) {
-      this.onSubmit = inner.onSubmit.bind(inner);
-    }
-    if (inner.onChange) {
-      this.onChange = inner.onChange.bind(inner);
-    }
-  }
-
-  // ── Delegated members ───────────────────────────────────
-  get focused(): boolean {
-    return this.inner.focused;
-  }
-  set focused(value: boolean) {
-    this.inner.focused = value;
-  }
-  get onSubmit(): ((text: string) => void) | undefined {
-    return this.inner.onSubmit;
-  }
-  set onSubmit(fn: ((text: string) => void) | undefined) {
-    this.inner.onSubmit = fn;
-  }
-  get onChange(): ((text: string) => void) | undefined {
-    return this.inner.onChange;
-  }
-  set onChange(fn: ((text: string) => void) | undefined) {
-    this.inner.onChange = fn;
-  }
-  get borderColor(): ((str: string) => string) | undefined {
-    return this.inner.borderColor;
-  }
-  set borderColor(fn: ((str: string) => string) | undefined) {
-    this.inner.borderColor = fn;
-  }
-
-  // ── Component interface ─────────────────────────────────
-  render(width: number): string[] {
-    const lines = this.inner.render(width);
-    // Highlight $skill_name patterns with accent color in every line
-    return lines.map((line: string) =>
-      line.replace(SKILL_DISPLAY_RE, (match: string) => this.theme.fg("accent", match)),
-    );
-  }
-  invalidate(): void { this.inner.invalidate(); }
-  handleInput(data: string): void { this.inner.handleInput(data); }
-
-  // ── EditorComponent interface ───────────────────────────
-  getText(): string { return this.inner.getText(); }
-  setText(text: string): void { this.inner.setText(text); }
-  addToHistory?(text: string): void { this.inner.addToHistory?.(text); }
-  insertTextAtCursor?(text: string): void { this.inner.insertTextAtCursor?.(text); }
-  getExpandedText?(): string { return this.inner.getExpandedText?.() ?? this.inner.getText(); }
-  setAutocompleteProvider?(provider: unknown): void {
-    this.inner.setAutocompleteProvider?.(provider);
-  }
-  setPaddingX?(padding: number): void { this.inner.setPaddingX?.(padding); }
-  setAutocompleteMaxVisible?(maxVisible: number): void { this.inner.setAutocompleteMaxVisible?.(maxVisible); }
+/** Strip ANSI escape codes from a string (for clean parsing of colored text) */
+function stripAnsi(str: string): string {
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 // ── In-memory state ──────────────────────────────────────────────
@@ -176,7 +84,7 @@ function buildInjectionBlock(skills: SkillInfo[]): string {
 
 // ── Extension entry ──────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
-  // ── 0. Build registry, register autocomplete & editor wrapper ─
+  // ── 0. Build registry and register autocomplete on session start ─
   pi.on("session_start", async (_event, ctx) => {
     pendingSkills = [];
     skillsInjectedThisTurn = false;
@@ -184,28 +92,13 @@ export default function (pi: ExtensionAPI) {
     // Capture current theme for styling skill names
     const theme = ctx.ui.theme;
 
-    // ── Wrap editor to highlight $skill_name in accent color ──
-    const previousEditor = ctx.ui.getEditorComponent();
-    ctx.ui.setEditorComponent((tui: unknown, editorTheme: unknown, keybindings: unknown) => {
-      const inner: InnerEditor = previousEditor
-        ? (previousEditor(tui as any, editorTheme as any, keybindings as any) as unknown as InnerEditor)
-        : (tui as any).createDefaultEditor?.(editorTheme, keybindings) as unknown as InnerEditor;
-      if (!inner) {
-        // Fallback: if we can't get the editor, return a dummy so pi doesn't crash
-        return previousEditor
-          ? previousEditor(tui as any, editorTheme as any, keybindings as any)
-          : undefined as any;
-      }
-      return new SkillHighlightEditor(inner, theme) as any;
-    });
-
     // ── Register $ autocomplete provider ───────────────────────
     ctx.ui.addAutocompleteProvider((current) => ({
       triggerCharacters: ["$"],
 
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const line = lines[cursorLine] ?? "";
-        const beforeCursor = line.slice(0, cursorCol);
+        const beforeCursor = stripAnsi(line.slice(0, cursorCol));
 
         // Match $ followed by partial skill name at cursor position
         const match = beforeCursor.match(
@@ -233,10 +126,11 @@ export default function (pi: ExtensionAPI) {
             const desc = info.description.length > 80
               ? info.description.slice(0, 80) + "..."
               : info.description;
-            // Plain text — SkillHighlightEditor wrapper colors them at render time
+            // ANSI-colored for editor display + dropdown; stripAnsi cleans for parsing
+            const colored = theme.fg("accent", `$${name}`);
             items.push({
-              value: `$${name} `,
-              label: `$${name}`,
+              value: `${colored} `,
+              label: colored,
               description: desc,
             });
           }
@@ -253,13 +147,27 @@ export default function (pi: ExtensionAPI) {
       },
 
       applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-        return current.applyCompletion(
+        // Strip ANSI from both the value and prefix so the built-in
+        // applyCompletion calculates the correct cursor position
+        // (ANSI codes are zero-width visually but count as bytes)
+        const plainItem = { ...item, value: stripAnsi(item.value) };
+        const plainPrefix = stripAnsi(prefix);
+
+        const result = current.applyCompletion(
           lines,
           cursorLine,
           cursorCol,
-          item,
-          prefix,
+          plainItem,
+          plainPrefix,
         );
+
+        // Now inject the ANSI-colored value into the result line
+        const resultLine = result.lines[cursorLine];
+        const plainValue = plainItem.value;
+        const coloredValue = item.value;
+        result.lines[cursorLine] = resultLine.replace(plainValue, coloredValue);
+
+        return result;
       },
 
       shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
@@ -328,11 +236,17 @@ export default function (pi: ExtensionAPI) {
 
   // ── 3. Intercept user input, parse $skill_name references ──────
   pi.on("input", async (event, ctx) => {
-    if (!event.text || !event.text.includes("$")) {
+    if (!event.text) {
       return { action: "continue" };
     }
 
-    const refs = parseSkillRefs(event.text);
+    // Strip ANSI color codes injected by autocomplete before parsing
+    const cleanText = stripAnsi(event.text);
+    if (!cleanText.includes("$")) {
+      return { action: "continue" };
+    }
+
+    const refs = parseSkillRefs(cleanText);
     if (refs.length === 0) {
       return { action: "continue" };
     }
@@ -379,8 +293,9 @@ export default function (pi: ExtensionAPI) {
     // Transform: replace $skill_name → [skill: name] markers
     // replaceSkillRefs sorts by name length internally to prevent
     // partial matches (e.g. $code matched inside $code-review).
+    // Use cleanText (stripped of ANSI codes) for replacement.
     const transformed = replaceSkillRefs(
-      event.text,
+      cleanText,
       resolved.map(
         (s): SkillReplacement => ({ name: s.name, marker: `[skill: ${s.name}]` }),
       ),
