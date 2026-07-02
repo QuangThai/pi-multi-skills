@@ -10,7 +10,8 @@
  *   1. Inline autocomplete: type $ + Tab to browse available skills
  *   2. Parses $skill_name references from user input (input event)
  *   3. Resolves skill paths from Pi's loaded /skill:name commands
- *   4. Reads SKILL.md content and auto-injects into system prompt
+ *   4. Reads SKILL.md content and expands $skill_name → <skill> XML block
+ *     (same format as Pi's native /skill:xxx expansion)
  *   5. Provides `/skills` and `/skills-search` commands
  *   6. Shows a colored widget with detected skills above the editor
  */
@@ -28,61 +29,9 @@ import {
 } from "./parser";
 import { readFileSync } from "node:fs";
 
-// ── In-memory state ──────────────────────────────────────────────
-let pendingSkills: SkillInfo[] = [];
-let skillsInjectedThisTurn = false;
-
-// ── System prompt injection template ─────────────────────────────
-function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-function buildInjectionBlock(skills: SkillInfo[]): string {
-  const parts: string[] = [];
-
-  for (const skill of skills) {
-    let content: string;
-    try {
-      content = readFileSync(skill.skillMdPath, "utf-8");
-    } catch {
-      content = `[Unable to read ${skill.name} skill]`;
-    }
-
-    const body = stripFrontmatter(content).trim();
-
-    parts.push(
-      "<skill name=\"" + escapeXml(skill.name) + "\" location=\"" + escapeXml(skill.skillMdPath) + "\">\n" +
-      "References are relative to " + skill.dir + ".\n\n" +
-      body + "\n" +
-      "</skill>",
-    );
-  }
-
-  return (
-    "\n## Loaded Skills (via $skill_name)\n" +
-    "\n" +
-    "The user has requested the following skills to be active for this task.\n" +
-    "Apply their instructions where relevant.\n" +
-    "\n" +
-    parts.join("\n\n") +
-    "\n" +
-    "\n" +
-    "When referencing files from these skills, resolve relative paths against\n" +
-    "the skill directory shown in each block.\n"
-  );
-}
-
 // ── Extension entry ──────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    pendingSkills = [];
-    skillsInjectedThisTurn = false;
-
     // Capture current theme for styling skill names
     const theme = ctx.ui.theme;
 
@@ -214,7 +163,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 3. Intercept user input, parse $skill_name references ──────
+  // ── 3. Intercept user input, expand $skill_name → <skill> XML ──
   pi.on("input", async (event, ctx) => {
     if (!event.text || !event.text.includes("$")) {
       // Clear skill widget when no $ references
@@ -265,40 +214,39 @@ export default function (pi: ExtensionAPI) {
       return { action: "continue" };
     }
 
-    pendingSkills = resolved;
-    skillsInjectedThisTurn = false;
-
     ctx.ui.notify(
       `Loading skills: ${resolved.map((s) => `$${s.name}`).join(", ")}`,
       "info",
     );
 
-    // Transform: replace $skill_name → [skill: name] markers
-    const transformed = replaceSkillRefs(
-      event.text,
-      resolved.map(
-        (s): SkillReplacement => ({ name: s.name, marker: `[skill: ${s.name}]` }),
-      ),
-    );
+    // Expand: replace $skill_name → <skill name="..." location="...">...</skill>
+    // This produces the same XML format as Pi's native /skill:xxx expansion,
+    // but works inline at any position in the text, not just at the start.
+    const replacements: SkillReplacement[] = [];
+    for (const skill of resolved) {
+      try {
+        const content = readFileSync(skill.skillMdPath, "utf-8");
+        const body = stripFrontmatter(content).trim();
+        const marker =
+          `<skill name="${skill.name}" location="${skill.skillMdPath}">\n` +
+          `References are relative to ${skill.dir}.\n\n` +
+          `${body}\n` +
+          `</skill>`;
+        replacements.push({ name: skill.name, marker });
+      } catch {
+        ctx.ui.notify(
+          `Could not read skill file for $${skill.name}`,
+          "error",
+        );
+      }
+    }
+
+    if (replacements.length === 0) {
+      return { action: "continue" };
+    }
+
+    const transformed = replaceSkillRefs(event.text, replacements);
 
     return { action: "transform", text: transformed };
-  });
-
-  // ── 4. Inject skill content into system prompt ─────────────────
-  pi.on("before_agent_start", async (event) => {
-    if (pendingSkills.length === 0) return;
-    if (skillsInjectedThisTurn) return;
-    skillsInjectedThisTurn = true;
-
-    return {
-      systemPrompt:
-        event.systemPrompt + buildInjectionBlock(pendingSkills),
-    };
-  });
-
-  // ── 5. Clean up pending skills after turn ends ─────────────────
-  pi.on("turn_end", async () => {
-    pendingSkills = [];
-    skillsInjectedThisTurn = false;
   });
 }
