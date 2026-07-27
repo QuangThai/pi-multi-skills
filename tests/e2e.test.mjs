@@ -48,12 +48,12 @@ function simulateExpansion(text, registry) {
     );
   }
 
-  // Clean user text
+  // Remove $ prefix from skill references to keep user text readable.
+  // E.g. "Run $skill-a" → "Run skill-a"
   const userText = replaceSkillRefs(
     text,
-    resolved.map((s) => ({ name: s.name, marker: "" })),
+    resolved.map((s) => ({ name: s.name, marker: s.name })),
   )
-    .replace(/\\\$/g, "$")
     .replace(/\s{2,}/g, " ")
     .trim();
 
@@ -105,14 +105,14 @@ describe("E2E: single skill", () => {
     assert.match(out, /^<skill name="skill-a"/);
     assert.match(out, /Skill A/);
     assert.doesNotMatch(out, /Skill B/);
-    assert.match(out, /<\/skill>$/);
+    assert.match(out, /skill-a$/);
   });
 
   it("inline 'Use $skill-a' → <skill> at start + user text", () => {
     const r = buildSkillRegistry([skillCmd({ name: "skill-a", path: f1, baseDir: d1 })]);
     const out = simulateExpansion("Use $skill-a please", r);
     assert.match(out, /^<skill name="skill-a"/);
-    assert.match(out, /\n\nUse please$/);
+    assert.match(out, /\n\nUse skill-a please$/);
   });
 });
 
@@ -135,8 +135,8 @@ describe("E2E: multi-skill merged block", () => {
     assert.match(out, /Skill A/);
     assert.match(out, /Skill B/);
 
-    // No user text (bare refs)
-    assert.match(out, /<\/skill>$/);
+    // Bare refs expanded to readable names after skill block
+    assert.match(out, /\n\nskill-a skill-b$/);
   });
 
   it("inline multi-skill → merged block + user text", () => {
@@ -154,7 +154,7 @@ describe("E2E: multi-skill merged block", () => {
     assert.match(out, /Skill B/);
 
     // User text after \n\n
-    assert.match(out, /\n\nRun then here$/);
+    assert.match(out, /\n\nRun skill-a then skill-b here$/);
   });
 
   it("parseSkillBlock matches merged multi-skill block", () => {
@@ -170,7 +170,7 @@ describe("E2E: multi-skill merged block", () => {
     assert.equal(m[1], "skill-a, skill-b");
     assert.ok(m[3].includes("Skill A"));
     assert.ok(m[3].includes("Skill B"));
-    assert.equal(m[4], undefined);
+    assert.equal(m[4], "skill-a skill-b");
   });
 
   it("3 skills merged into one block", () => {
@@ -191,7 +191,7 @@ describe("E2E: multi-skill merged block", () => {
     assert.match(out, /Skill A/);
     assert.match(out, /Skill B/);
     assert.match(out, /Skill C/);
-    assert.match(out, /\n\nuse here$/);
+    assert.match(out, /\n\nuse skill-a skill-b skill-c here$/);
   });
 });
 
@@ -209,7 +209,7 @@ describe("E2E: edge cases", () => {
     const r = buildSkillRegistry([skillCmd({ name: "skill-a", path: f1, baseDir: d1 })]);
     const out = simulateExpansion("Price \\$100, not $skill-a", r);
     assert.match(out, /^<skill name="skill-a"/);
-    assert.match(out, /\n\nPrice \$100, not$/);
+    assert.match(out, /\n\nPrice \$100, not skill-a$/);
   });
 
   it("unknown skills keep $ as-is", () => {
@@ -235,6 +235,6 @@ describe("E2E: edge cases", () => {
     assert.equal(out.match(/<skill name=/g).length, 1);
     assert.match(out, /Code Review/);
     assert.match(out, /# Code/);
-    assert.match(out, /\n\nand$/);
+    assert.match(out, /\n\ncode-review and code$/);
   });
 });

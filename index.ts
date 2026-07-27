@@ -239,10 +239,11 @@ export default function (pi: ExtensionAPI) {
       return { action: "continue" };
     }
 
-    // Remove all $skill_name references from the text to get clean user text.
+    // Remove $ prefix from skill references to keep user text readable.
+    // E.g. "Apply $code-review" → "Apply code-review"
     const userText = replaceSkillRefs(
       event.text,
-      resolved.map((s): SkillReplacement => ({ name: s.name, marker: "" })),
+      resolved.map((s): SkillReplacement => ({ name: s.name, marker: s.name })),
     )
       .replace(/\s{2,}/g, " ")
       .trim();
