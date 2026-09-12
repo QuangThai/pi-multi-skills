@@ -1,123 +1,133 @@
-/**
- * Tests for multi-skills parser.
- *
- * Run with: npm test
- */
-
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
-import { parseSkillRefs, replaceSkillRefs } from "../parser.ts";
+import {
+  getSkillCompletionPrefix,
+  parseSkillRefs,
+  replaceSkillRefs,
+} from "../parser.ts";
 
-// ────────────────────────────────────────────────────────────────
+const known = (...names) => new Set(names);
 
 describe("parseSkillRefs", () => {
-  it("finds single skill reference", () => {
-    const refs = parseSkillRefs("Use $code-review");
-    assert.equal(refs.length, 1);
-    assert.equal(refs[0].name, "code-review");
+  it("finds and deduplicates references in first-occurrence order", () => {
+    const refs = parseSkillRefs("$skill-a then $skill-b and $skill-a");
+    assert.deepEqual(refs.map(({ name }) => name), ["skill-a", "skill-b"]);
+    assert.equal(refs[0].index, 0);
   });
 
-  it("finds multiple lowercase skill references", () => {
-    const refs = parseSkillRefs("Use $skilla and $skillb");
-    assert.equal(refs.length, 2);
-    assert.equal(refs[0].name, "skilla");
-    assert.equal(refs[1].name, "skillb");
+  it("filters candidates against Pi's installed-skill registry", () => {
+    const refs = parseSkillRefs("Price $100; shell $path; use $code-review", known("code-review"));
+    assert.deepEqual(refs.map(({ name }) => name), ["code-review"]);
   });
 
-  it("returns empty for plain text", () => {
-    assert.equal(parseSkillRefs("Just normal text").length, 0);
+  it("supports spec-valid names beginning with a digit", () => {
+    const refs = parseSkillRefs("Use $3d-modeling", known("3d-modeling"));
+    assert.deepEqual(refs.map(({ name }) => name), ["3d-modeling"]);
   });
 
-  it("skips escaped dollar", () => {
-    const refs = parseSkillRefs("Use \\$code-review");
-    assert.equal(refs.length, 0);
+  it("ignores uppercase and mixed-case shell-style variables", () => {
+    assert.deepEqual(parseSkillRefs("$PATH $HOME $skillName"), []);
   });
 
-  it("deduplicates same skill", () => {
-    const refs = parseSkillRefs("Use $skilla and $skilla");
-    assert.equal(refs.length, 1);
+  it("requires a token boundary before and after the reference", () => {
+    assert.deepEqual(
+      parseSkillRefs("email$skill foo_$skill café$skill 𐐀$skill $skill日本 $skill𐐀"),
+      [],
+    );
+    assert.deepEqual(parseSkillRefs("($skill), [$other]").map(({ name }) => name), ["skill", "other"]);
   });
 
-  it("ignores $ followed by digit (not a letter)", () => {
-    const refs = parseSkillRefs("Price $100");
-    assert.equal(refs.length, 0);
+  it("skips escaped references but accepts dollars after an even slash run", () => {
+    assert.deepEqual(parseSkillRefs("Use \\$code-review"), []);
+    assert.deepEqual(
+      parseSkillRefs("Use \\\\$code-review").map(({ name }) => name),
+      ["code-review"],
+    );
   });
 
-  it("ignores uppercase shell-style variables", () => {
-    const refs = parseSkillRefs("Path $PATH and $HOME");
-    assert.equal(refs.length, 0);
+  it("skips inline Markdown code without treating escaped backticks as delimiters", () => {
+    const refs = parseSkillRefs("Use `$code-review`, \\` then $real-skill");
+    assert.deepEqual(refs.map(({ name }) => name), ["real-skill"]);
   });
 
-  it("handles $ at start of line", () => {
-    const refs = parseSkillRefs("$skilla is good");
-    assert.equal(refs.length, 1);
-    assert.equal(refs[0].name, "skilla");
+  it("skips backtick and tilde fenced Markdown code", () => {
+    const text = [
+      "```sh",
+      "echo $code-review",
+      "```",
+      "$real-skill",
+      "~~~php",
+      "$another-skill",
+      "~~~",
+    ].join("\n");
+    assert.deepEqual(parseSkillRefs(text).map(({ name }) => name), ["real-skill"]);
   });
 
-  it("handles $ with trailing punctuation", () => {
-    const refs = parseSkillRefs("Use $skilla, $skillb.");
-    assert.equal(refs.length, 2);
+  it("does not treat an invalid backtick fence opener as code", () => {
+    const refs = parseSkillRefs("```bad`info```\n$skill-a");
+    assert.deepEqual(refs.map(({ name }) => name), ["skill-a"]);
   });
 
-  it("ignores mixed-case skill-like tokens instead of partially matching them", () => {
-    assert.equal(parseSkillRefs("Use $skillA").length, 0);
-  });
-
-  it("handles empty string", () => {
-    assert.equal(parseSkillRefs("").length, 0);
+  it("handles punctuation and an empty string", () => {
+    assert.deepEqual(parseSkillRefs("Use $skill-a, $skill-b.").map(({ name }) => name), ["skill-a", "skill-b"]);
+    assert.deepEqual(parseSkillRefs(""), []);
   });
 });
 
-// ────────────────────────────────────────────────────────────────
-
 describe("replaceSkillRefs", () => {
-  it("replaces single skill", () => {
-    const result = replaceSkillRefs("Use $code-review", [
-      { name: "code-review", marker: "[skill: code-review]" },
+  it("replaces every known occurrence without changing whitespace", () => {
+    const input = "Before\n\n  Use $code-review  here\nAfter";
+    const result = replaceSkillRefs(input, [
+      { name: "code-review", marker: "code-review" },
     ]);
-    assert.equal(result, "Use [skill: code-review]");
+    assert.equal(result, "Before\n\n  Use code-review  here\nAfter");
   });
 
-  it("does not replace uppercase variants", () => {
-    const result = replaceSkillRefs("Use $skillA and $skillB", [
-      { name: "skilla", marker: "[skill: skillA]" },
-      { name: "skillb", marker: "[skill: skillB]" },
+  it("replaces overlapping names exactly", () => {
+    const result = replaceSkillRefs("$code-review and $code", [
+      { name: "code", marker: "code" },
+      { name: "code-review", marker: "code-review" },
     ]);
-    assert.equal(result, "Use $skillA and $skillB");
+    assert.equal(result, "code-review and code");
   });
 
-  it("replaces multiple lowercase skills", () => {
-    const result = replaceSkillRefs("Use $skilla and $skillb", [
-      { name: "skilla", marker: "[skill: skillA]" },
-      { name: "skillb", marker: "[skill: skillB]" },
+  it("does not alter references inside Markdown code", () => {
+    const input = "`$code-review`\n\n```sh\n$code-review\n```\n\nUse $code-review";
+    const result = replaceSkillRefs(input, [
+      { name: "code-review", marker: "code-review" },
     ]);
-    assert.equal(result, "Use [skill: skillA] and [skill: skillB]");
+    assert.equal(result, "`$code-review`\n\n```sh\n$code-review\n```\n\nUse code-review");
   });
 
-  it("handles overlapping names (longest first)", () => {
-    const result = replaceSkillRefs("Use $code-review and $code", [
-      { name: "code", marker: "[skill: code]" },
-      { name: "code-review", marker: "[skill: code-review]" },
-    ]);
-    assert.equal(result, "Use [skill: code-review] and [skill: code]");
+  it("unescapes literal dollars outside code only when a transform occurs", () => {
+    const input = "Price \\$100, use $skill; keep `\\$inside`";
+    assert.equal(
+      replaceSkillRefs(input, [{ name: "skill", marker: "skill" }]),
+      "Price $100, use skill; keep `\\$inside`",
+    );
+    assert.equal(replaceSkillRefs("\\$skill", []), "\\$skill");
   });
 
-  it("preserves escaped dollar", () => {
-    const result = replaceSkillRefs("Use \\$skillA", [
-      { name: "skilla", marker: "[skill: skillA]" },
+  it("leaves unknown and mixed-case references untouched", () => {
+    const result = replaceSkillRefs("$known $unknown $skillName", [
+      { name: "known", marker: "known" },
     ]);
-    assert.equal(result, "Use $skillA");
+    assert.equal(result, "known $unknown $skillName");
+  });
+});
+
+describe("getSkillCompletionPrefix", () => {
+  it("recognizes empty, partial, digit-leading, and punctuation-delimited triggers", () => {
+    assert.equal(getSkillCompletionPrefix("Use $"), "");
+    assert.equal(getSkillCompletionPrefix("Use $code-"), "code-");
+    assert.equal(getSkillCompletionPrefix("($3d"), "3d");
   });
 
-  it("returns original text when no replacements", () => {
-    const result = replaceSkillRefs("Just text", []);
-    assert.equal(result, "Just text");
-  });
-
-  it("replaces multiple occurrences of same skill", () => {
-    const result = replaceSkillRefs("$code $code", [
-      { name: "code", marker: "[skill: code]" },
-    ]);
-    assert.equal(result, "[skill: code] [skill: code]");
+  it("rejects embedded, escaped, uppercase, and code triggers", () => {
+    assert.equal(getSkillCompletionPrefix("email$code"), undefined);
+    assert.equal(getSkillCompletionPrefix("Use \\$code"), undefined);
+    assert.equal(getSkillCompletionPrefix("Use $CODE"), undefined);
+    assert.equal(getSkillCompletionPrefix("Use `$code"), undefined);
+    assert.equal(getSkillCompletionPrefix("```sh\n$code"), undefined);
   });
 });

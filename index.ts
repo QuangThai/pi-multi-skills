@@ -1,121 +1,115 @@
 /**
- * multi-skills — Multi-skill invocation for pi coding agent
+ * Multi-skill invocation for Pi.
  *
- * Allows users to reference any installed skill from anywhere in their prompt
- * using $skill_name syntax:
- *
- *   "Apply $code-review and $ui-ux-pro-max to review this UI"
- *
- * The extension:
- *   1. Inline autocomplete: type $ + Tab to browse available skills
- *   2. Parses $skill_name references from user input (input event)
- *   3. Resolves skill paths from Pi's loaded /skill:name commands
- *   4. Reads SKILL.md content and expands $skill_name → <skill> XML block
- *     (same format as Pi's native /skill:xxx expansion)
- *   5. Provides `/skills` and `/skills-search` commands
- *   6. Shows a colored widget with detected skills above the editor
+ * Type `$skill-name` anywhere in a user/RPC prompt to load one or more skills
+ * through the same structural wrapper Pi uses for native skill invocations.
  */
 
-import { stripFrontmatter, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { expandSkillReferences } from "./expander";
+import { getSkillCompletionPrefix } from "./parser";
 import {
   buildSkillRegistry,
   formatSkillTable,
   type SkillInfo,
 } from "./resolver";
-import {
-  parseSkillRefs,
-  replaceSkillRefs,
-  type SkillReplacement,
-} from "./parser";
-import { readFileSync } from "node:fs";
 
-// ── Extension entry ──────────────────────────────────────────────
-export default function (pi: ExtensionAPI) {
-  pi.on("session_start", async (_event, ctx) => {
-    // Capture current theme for styling skill names
+const MAX_AUTOCOMPLETE_RESULTS = 20;
+const LARGE_INJECTION_CHARACTERS = 50_000;
+const WIDGET_KEY = "multi-skills";
+
+function truncateDescription(description: string, length: number): string {
+  return description.length > length
+    ? `${description.slice(0, length)}...`
+    : description;
+}
+
+function rankAutocompleteSkills(
+  registry: Map<string, SkillInfo>,
+  partial: string,
+): SkillInfo[] {
+  return [...registry.values()]
+    .filter(({ name }) => name.includes(partial))
+    .sort((left, right) => {
+      const prefixDifference = Number(!left.name.startsWith(partial)) -
+        Number(!right.name.startsWith(partial));
+      if (prefixDifference !== 0) return prefixDifference;
+
+      const indexDifference = left.name.indexOf(partial) - right.name.indexOf(partial);
+      return indexDifference || left.name.localeCompare(right.name);
+    })
+    .slice(0, MAX_AUTOCOMPLETE_RESULTS);
+}
+
+export default function multiSkillsExtension(pi: ExtensionAPI): void {
+  let cachedRegistry: Map<string, SkillInfo> | undefined;
+
+  const refreshRegistry = (): Map<string, SkillInfo> => {
+    cachedRegistry = buildSkillRegistry(pi.getCommands());
+    return cachedRegistry;
+  };
+
+  const getRegistry = (): Map<string, SkillInfo> => cachedRegistry ?? refreshRegistry();
+
+  pi.on("session_start", (_event, ctx) => {
+    refreshRegistry();
+    ctx.ui.setWidget(WIDGET_KEY, undefined);
     const theme = ctx.ui.theme;
 
-    // ── Register $ autocomplete provider ───────────────────────
     ctx.ui.addAutocompleteProvider((current) => ({
       triggerCharacters: ["$"],
 
       async getSuggestions(lines, cursorLine, cursorCol, options) {
         const line = lines[cursorLine] ?? "";
         const beforeCursor = line.slice(0, cursorCol);
-
-        // Match $ followed by partial skill name at cursor position
-        const match = beforeCursor.match(
-          /(?:^|[^\\])\$((?:[a-z][a-z0-9_-]*)?)$/,
-        );
-        if (!match) {
+        const linePartial = getSkillCompletionPrefix(beforeCursor);
+        if (linePartial === undefined) {
           return current.getSuggestions(lines, cursorLine, cursorCol, options);
         }
 
-        const partial = (match[1] ?? "").toLowerCase();
-        const registry = buildSkillRegistry(pi.getCommands());
+        const partial = cursorLine === 0
+          ? linePartial
+          : getSkillCompletionPrefix([
+            ...lines.slice(0, cursorLine),
+            beforeCursor,
+          ].join("\n"));
+        if (partial === undefined) {
+          return current.getSuggestions(lines, cursorLine, cursorCol, options);
+        }
+        if (options.signal.aborted) return null;
 
+        const registry = getRegistry();
         if (registry.size === 0) {
           return current.getSuggestions(lines, cursorLine, cursorCol, options);
         }
 
-        // Filter skills by partial name match
-        const items: Array<{
-          value: string;
-          label: string;
-          description: string;
-        }> = [];
-        for (const [name, info] of registry) {
-          if (name.startsWith(partial) || name.includes(partial)) {
-            const desc = info.description.length > 80
-              ? info.description.slice(0, 80) + "..."
-              : info.description;
-            // Plain text value (editor text buffer) + trailing space for seamless typing
-            // Colored label for autocomplete dropdown display
-            items.push({
-              value: `$${name} `,
-              label: theme.fg("accent", `$${name}`),
-              description: desc,
-            });
-          }
-        }
+        const items = rankAutocompleteSkills(registry, partial).map((skill) => ({
+          value: `$${skill.name} `,
+          label: theme.fg("accent", `$${skill.name}`),
+          description: truncateDescription(skill.description, 80),
+        }));
 
         if (items.length === 0) {
           return current.getSuggestions(lines, cursorLine, cursorCol, options);
         }
 
-        return {
-          prefix: `$${partial}`,
-          items,
-        };
+        return { prefix: `$${partial}`, items };
       },
 
       applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-        return current.applyCompletion(
-          lines,
-          cursorLine,
-          cursorCol,
-          item,
-          prefix,
-        );
+        return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
       },
 
       shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
-        return (
-          current.shouldTriggerFileCompletion?.(
-            lines,
-            cursorLine,
-            cursorCol,
-          ) ?? true
-        );
+        return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
       },
     }));
   });
 
-  // ── 1. /skills command ─────────────────────────────────────────
   pi.registerCommand("skills", {
     description: "List all available skills with their $name syntax",
     handler: async (_args, ctx) => {
-      const registry = buildSkillRegistry(pi.getCommands());
+      const registry = getRegistry();
       if (registry.size === 0) {
         ctx.ui.notify("No skills found.", "warning");
         return;
@@ -127,156 +121,89 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 2. /skills-search command ──────────────────────────────────
   pi.registerCommand("skills-search", {
     description: "Search skills by keyword",
     handler: async (args, ctx) => {
-      if (!args?.trim()) {
+      const keyword = args.trim().toLowerCase();
+      if (!keyword) {
         ctx.ui.notify("Usage: /skills-search <keyword>", "warning");
         return;
       }
 
-      const registry = buildSkillRegistry(pi.getCommands());
-      const keyword = args.toLowerCase();
       const matches: string[] = [];
-
-      for (const [name, info] of registry) {
+      for (const [name, info] of getRegistry()) {
         if (
           name.includes(keyword) ||
           info.description.toLowerCase().includes(keyword)
         ) {
-          const desc = info.description.length > 60
-            ? info.description.slice(0, 60) + "..."
-            : info.description;
-          matches.push(`  \$${name.padEnd(28)} ${desc}`);
+          matches.push(
+            `  $${name.padEnd(28)} ${truncateDescription(info.description, 60)}`,
+          );
         }
       }
 
       if (matches.length === 0) {
-        ctx.ui.notify(`No skills matching "${args}"`, "warning");
-      } else {
-        ctx.ui.notify(
-          `Skills matching "${args}" (${matches.length}):\n\n${matches.join("\n")}`,
-          "info",
-        );
+        ctx.ui.notify(`No skills matching "${args.trim()}"`, "warning");
+        return;
       }
+
+      ctx.ui.notify(
+        `Skills matching "${args.trim()}" (${matches.length}):\n\n${matches.join("\n")}`,
+        "info",
+      );
     },
   });
 
-  // ── 3. Intercept user input, expand $skill_name → <skill> XML ──
   pi.on("input", async (event, ctx) => {
-    if (!event.text || !event.text.includes("$")) {
-      // Clear skill widget when no $ references
-      ctx.ui.setWidget("multi-skills", undefined);
+    // Match Pi's documented routing pattern: extension-injected messages should
+    // not unexpectedly activate another extension's `$variables`.
+    if (event.source === "extension") return { action: "continue" };
+
+    if (!event.text.includes("$")) {
+      ctx.ui.setWidget(WIDGET_KEY, undefined);
       return { action: "continue" };
     }
 
-    const refs = parseSkillRefs(event.text);
-    if (refs.length === 0) {
-      ctx.ui.setWidget("multi-skills", undefined);
-      return { action: "continue" };
-    }
+    const expansion = await expandSkillReferences(event.text, getRegistry());
 
-    const registry = buildSkillRegistry(pi.getCommands());
-    const theme = ctx.ui.theme;
-
-    const resolved: SkillInfo[] = [];
-    const unresolved: string[] = [];
-
-    for (const ref of refs) {
-      const skill = registry.get(ref.name);
-      if (skill) {
-        resolved.push(skill);
-      } else {
-        unresolved.push(ref.name);
-      }
-    }
-
-    // Update widget to show detected skills with theme colors
-    if (resolved.length > 0) {
-      const coloredSkills = resolved
-        .map((s) => theme.fg("accent", `$${s.name}`))
-        .join("  ");
-      ctx.ui.setWidget("multi-skills", [
-        theme.fg("dim", "Skills: ") + coloredSkills,
-      ]);
-    }
-
-    if (unresolved.length > 0) {
+    for (const failure of expansion.failures) {
       ctx.ui.notify(
-        `Unknown skills: ${unresolved.join(", ")}. Use /skills to see available skills.`,
+        `Could not read skill file for $${failure.skill.name}: ${failure.message}`,
+        "error",
+      );
+    }
+
+    if (!expansion.transformed) {
+      ctx.ui.setWidget(WIDGET_KEY, undefined);
+      return { action: "continue" };
+    }
+
+    const theme = ctx.ui.theme;
+    const coloredSkills = expansion.loaded
+      .map((skill) => theme.fg("accent", `$${skill.name}`))
+      .join("  ");
+    ctx.ui.setWidget(WIDGET_KEY, [
+      theme.fg("dim", "Skills: ") + coloredSkills,
+    ]);
+
+    ctx.ui.notify(
+      `Loaded skills: ${expansion.loaded.map((skill) => `$${skill.name}`).join(", ")}`,
+      "info",
+    );
+
+    if (expansion.bodyCharacters > LARGE_INJECTION_CHARACTERS) {
+      ctx.ui.notify(
+        `Loaded skill instructions contain ${expansion.bodyCharacters.toLocaleString("en-US")} characters; consider invoking fewer skills to preserve context.`,
         "warning",
       );
     }
 
-    if (resolved.length === 0) {
-      ctx.ui.setWidget("multi-skills", undefined);
-      return { action: "continue" };
-    }
+    return event.images
+      ? { action: "transform", text: expansion.text, images: event.images }
+      : { action: "transform", text: expansion.text };
+  });
 
-    ctx.ui.notify(
-      `Loading skills: ${resolved.map((s) => `$${s.name}`).join(", ")}`,
-      "info",
-    );
-
-    // Read all skill file contents (errors skip that skill)
-    interface SkillData { skill: SkillInfo; body: string }
-    const skillData: SkillData[] = [];
-    for (const skill of resolved) {
-      try {
-        const content = readFileSync(skill.skillMdPath, "utf-8");
-        const body = stripFrontmatter(content).trim();
-        skillData.push({ skill, body });
-      } catch {
-        ctx.ui.notify(
-          `Could not read skill file for $${skill.name}`,
-          "error",
-        );
-      }
-    }
-
-    if (skillData.length === 0) {
-      return { action: "continue" };
-    }
-
-    // Remove $ prefix from skill references to keep user text readable.
-    // E.g. "Apply $code-review" → "Apply code-review"
-    const userText = replaceSkillRefs(
-      event.text,
-      resolved.map((s): SkillReplacement => ({ name: s.name, marker: s.name })),
-    )
-      .replace(/\s{2,}/g, " ")
-      .trim();
-
-    // Build ONE <skill> block at the message start so Pi's parseSkillBlock
-    // detects it and renders compactly via SkillInvocationMessageComponent.
-    // For multiple skills, merge all into one block (parseSkillBlock's
-    // non-greedy regex only catches the FIRST block).
-    let skillBlock: string;
-    if (skillData.length === 1) {
-      const { skill, body } = skillData[0];
-      skillBlock =
-        `<skill name="${skill.name}" location="${skill.skillMdPath}">\n` +
-        `References are relative to ${skill.dir}.\n\n` +
-        `${body}\n` +
-        `</skill>`;
-    } else {
-      const allNames = skillData.map((d) => d.skill.name).join(", ");
-      const first = skillData[0].skill;
-      const mergedBody = skillData
-        .map((d) => `## ${d.skill.name}\n\n${d.body}`)
-        .join("\n\n---\n\n");
-      skillBlock =
-        `<skill name="${allNames}" location="${first.skillMdPath}">\n` +
-        `References are relative to ${first.dir}.\n\n` +
-        `${mergedBody}\n` +
-        `</skill>`;
-    }
-
-    const transformed = userText
-      ? `${skillBlock}\n\n${userText}`
-      : skillBlock;
-
-    return { action: "transform", text: transformed };
+  pi.on("turn_end", (_event, ctx) => {
+    ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
 }

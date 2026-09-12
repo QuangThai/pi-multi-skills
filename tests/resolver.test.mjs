@@ -1,21 +1,15 @@
-/**
- * Tests for multi-skills resolver.
- *
- * Run with: npm test
- */
-
-import { describe, it, before } from "node:test";
+import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
-import {
-  buildSkillRegistry,
-  formatSkillTable,
-  parseFrontmatter,
-} from "../resolver.ts";
+import { buildSkillRegistry, formatSkillTable } from "../resolver.ts";
 
-function skillCommand({ name, description = "Test skill", path, baseDir, scope = "user" }) {
+function skillCommand({
+  name,
+  description = "Test skill",
+  path,
+  baseDir,
+  scope = "user",
+}) {
   return {
     name: `skill:${name}`,
     description,
@@ -25,7 +19,7 @@ function skillCommand({ name, description = "Test skill", path, baseDir, scope =
       source: "local",
       scope,
       origin: "top-level",
-      baseDir,
+      ...(baseDir ? { baseDir } : {}),
     },
   };
 }
@@ -44,127 +38,86 @@ function extensionCommand() {
   };
 }
 
-let tmpDir;
-let skillDir;
-let skillFile;
-let flatSkillFile;
-
-before(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "multi-skills-test-"));
-
-  skillDir = join(tmpDir, "my-skill");
-  mkdirSync(skillDir);
-  skillFile = join(skillDir, "SKILL.md");
-  writeFileSync(
-    skillFile,
-    "---\nname: my-skill\ndescription: My test skill\n---\n\n# My Skill\nDo something.",
-  );
-
-  flatSkillFile = join(tmpDir, "flat-skill.md");
-  writeFileSync(
-    flatSkillFile,
-    "---\nname: flat-skill\ndescription: Flat test skill\n---\n\n# Flat Skill",
-  );
-});
-
-// ────────────────────────────────────────────────────────────────
-
 describe("buildSkillRegistry", () => {
-  it("builds a registry from Pi skill commands", () => {
+  it("uses Pi's canonical file and base-directory metadata", () => {
+    const file = join("root", "my-skill", "SKILL.md");
+    const baseDir = join("root", "my-skill");
     const registry = buildSkillRegistry([
       extensionCommand(),
-      skillCommand({ name: "my-skill", description: "My test skill", path: skillFile, baseDir: skillDir }),
+      skillCommand({
+        name: "my-skill",
+        description: "My test skill",
+        path: file,
+        baseDir,
+      }),
     ]);
 
     assert.equal(registry.size, 1);
-    assert.equal(registry.get("my-skill")?.description, "My test skill");
-    assert.equal(registry.get("my-skill")?.skillMdPath, skillFile);
-    assert.equal(registry.get("my-skill")?.dir, skillDir);
+    assert.deepEqual(registry.get("my-skill"), {
+      name: "my-skill",
+      description: "My test skill",
+      dir: baseDir,
+      skillMdPath: file,
+    });
   });
 
-  it("resolves directory command paths to SKILL.md", () => {
+  it("supports older/synthetic directory paths without filesystem I/O", () => {
+    const directory = join("root", "directory-skill");
     const registry = buildSkillRegistry([
-      skillCommand({ name: "my-skill", path: skillDir, baseDir: skillDir }),
+      skillCommand({ name: "directory-skill", path: directory, baseDir: directory }),
     ]);
-
-    assert.equal(registry.get("my-skill")?.skillMdPath, skillFile);
+    assert.equal(
+      registry.get("directory-skill")?.skillMdPath,
+      join(directory, "SKILL.md"),
+    );
   });
 
-  it("supports flat markdown skill paths exposed by Pi", () => {
+  it("derives a base directory when sourceInfo.baseDir is absent", () => {
+    const file = join("root", "flat-skill.md");
     const registry = buildSkillRegistry([
-      skillCommand({ name: "flat-skill", path: flatSkillFile, baseDir: tmpDir, scope: "project" }),
+      skillCommand({ name: "flat-skill", path: file, scope: "project" }),
     ]);
-
     const skill = registry.get("flat-skill");
-    assert.ok(skill);
-    assert.equal(skill.skillMdPath, flatSkillFile);
-    assert.equal(skill.dir, tmpDir);
-    assert.equal(skill.scope, "project");
+    assert.equal(skill?.dir, "root");
   });
 
-  it("keeps the first skill on duplicate names to preserve Pi command order", () => {
+  it("keeps missing files for lazy invocation-time error reporting", () => {
+    const missing = join("does-not-exist", "SKILL.md");
     const registry = buildSkillRegistry([
-      skillCommand({ name: "my-skill", description: "First", path: skillFile, baseDir: skillDir }),
-      skillCommand({ name: "my-skill", description: "Second", path: skillFile, baseDir: skillDir }),
+      skillCommand({ name: "missing", path: missing }),
     ]);
-
-    assert.equal(registry.get("my-skill")?.description, "First");
+    assert.equal(registry.get("missing")?.skillMdPath, missing);
   });
 
-  it("skips malformed skill command entries", () => {
+  it("keeps Pi's first command when names collide", () => {
     const registry = buildSkillRegistry([
-      skillCommand({ name: "missing", path: join(tmpDir, "missing.md") }),
-      { ...skillCommand({ name: "bad", path: tmpDir }), name: "bad" },
+      skillCommand({ name: "same", description: "First", path: "first.md" }),
+      skillCommand({ name: "same", description: "Second", path: "second.md" }),
     ]);
+    assert.equal(registry.get("same")?.description, "First");
+  });
 
+  it("skips non-skill and malformed commands", () => {
+    const registry = buildSkillRegistry([
+      extensionCommand(),
+      { ...skillCommand({ name: "bad-name", path: "bad.md" }), name: "bad-name" },
+      skillCommand({ name: "", path: "empty.md" }),
+      skillCommand({ name: "missing-path", path: "" }),
+    ]);
     assert.equal(registry.size, 0);
   });
 });
 
-describe("parseFrontmatter", () => {
-  it("parses name and description", () => {
-    const { frontmatter } = parseFrontmatter(
-      "---\nname: test\ndescription: A test\n---\n\nBody",
-    );
-    assert.equal(frontmatter?.name, "test");
-    assert.equal(frontmatter?.description, "A test");
-  });
-
-  it("strips quotes from values", () => {
-    const { frontmatter } = parseFrontmatter(
-      '---\nname: "quoted"\n---\n\nBody',
-    );
-    assert.equal(frontmatter?.name, "quoted");
-  });
-
-  it("parses boolean values", () => {
-    const { frontmatter } = parseFrontmatter(
-      "---\ndisable-model-invocation: true\n---\n\nBody",
-    );
-    assert.equal(frontmatter?.["disable-model-invocation"], true);
-  });
-
-  it("returns body without frontmatter", () => {
-    const { frontmatter, body } = parseFrontmatter(
-      "---\nname: test\n---\n\n# Actual content",
-    );
-    assert.ok(frontmatter);
-    assert.match(body, /Actual content/);
-  });
-
-  it("handles no frontmatter", () => {
-    const { frontmatter, body } = parseFrontmatter("Just content");
-    assert.equal(frontmatter, undefined);
-    assert.equal(body, "Just content");
-  });
-});
-
 describe("formatSkillTable", () => {
-  it("formats registered skills with $ syntax", () => {
+  it("formats skill syntax and truncates long descriptions", () => {
     const registry = buildSkillRegistry([
-      skillCommand({ name: "my-skill", description: "My test skill", path: skillFile, baseDir: skillDir }),
+      skillCommand({
+        name: "my-skill",
+        description: "x".repeat(80),
+        path: "my-skill.md",
+      }),
     ]);
-
-    assert.match(formatSkillTable(registry), /\$my-skill\s+My test skill/);
+    const table = formatSkillTable(registry);
+    assert.match(table, /^  \$my-skill\s+x{60}\.\.\.$/);
   });
 });

@@ -1,240 +1,601 @@
-/**
- * End-to-end integration tests for multi-skills.
- *
- * Simulates the full pipeline:
- *   mock SlashCommandInfo[] → buildSkillRegistry
- *   mock user input → parseSkillRefs
- *   → prepend <skill> XML block (merged for multi-skill)
- *   → verify parseSkillBlock compatibility
- */
-
-import { describe, it, before } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { execFile as execFileCallback } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { buildSkillRegistry } from "../resolver.ts";
-import { parseSkillRefs, replaceSkillRefs } from "../parser.ts";
-import { stripFrontmatter } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { parseSkillBlock } from "@earendil-works/pi-coding-agent";
+import multiSkillsExtension from "../index.ts";
 
-const SKILL_A_CONTENT = `# Skill A\n\nContent A`;
-const SKILL_B_CONTENT = `# Skill B\n\nContent B`;
+const execFile = promisify(execFileCallback);
 
-function skillCmd({ name, description = "Test", path, baseDir, scope = "user" }) {
+function skillCommand({
+  name,
+  path,
+  baseDir,
+  description = `Description for ${name}`,
+  scope = "user",
+}) {
   return {
     name: `skill:${name}`,
     description,
     source: "skill",
-    sourceInfo: { path, source: "local", scope, origin: "top-level", baseDir },
+    sourceInfo: {
+      path,
+      source: "local",
+      scope,
+      origin: "top-level",
+      baseDir,
+    },
   };
 }
 
-function simulateExpansion(text, registry) {
-  const refs = parseSkillRefs(text);
-  if (refs.length === 0) return text;
+function createContext() {
+  const notifications = [];
+  const widgetCalls = [];
+  const autocompleteFactories = [];
+  const theme = { fg: (_color, text) => text };
+  const ui = {
+    theme,
+    notify(message, level) {
+      notifications.push({ message, level });
+    },
+    setWidget(key, content) {
+      widgetCalls.push({ key, content });
+    },
+    addAutocompleteProvider(factory) {
+      autocompleteFactories.push(factory);
+    },
+  };
 
-  const resolved = refs.map((r) => registry.get(r.name)).filter(Boolean);
-  if (resolved.length === 0) return text;
-
-  // Build <skill> XML blocks
-  const xmlBlocks = [];
-  for (const s of resolved) {
-    const content = readFileSync(s.skillMdPath, "utf-8");
-    const body = stripFrontmatter(content).trim();
-    xmlBlocks.push(
-      `<skill name="${s.name}" location="${s.skillMdPath}">\n` +
-      `References are relative to ${s.dir}.\n\n${body}\n</skill>`,
-    );
-  }
-
-  // Remove $ prefix from skill references to keep user text readable.
-  // E.g. "Run $skill-a" → "Run skill-a"
-  const userText = replaceSkillRefs(
-    text,
-    resolved.map((s) => ({ name: s.name, marker: s.name })),
-  )
-    .replace(/\s{2,}/g, " ")
-    .trim();
-
-  // SINGLE skill → use as-is. MULTI skill → merge into one block.
-  let skillBlock;
-  if (xmlBlocks.length === 1) {
-    skillBlock = xmlBlocks[0];
-  } else {
-    const first = resolved[0];
-    const allNames = resolved.map((s) => s.name).join(", ");
-    const mergedBody = resolved
-      .map((s) => {
-        const c = readFileSync(s.skillMdPath, "utf-8");
-        const b = stripFrontmatter(c).trim();
-        return `## ${s.name}\n\n${b}`;
-      })
-      .join("\n\n---\n\n");
-    skillBlock =
-      `<skill name="${allNames}" location="${first.skillMdPath}">\n` +
-      `References are relative to ${first.dir}.\n\n${mergedBody}\n</skill>`;
-  }
-
-  return userText ? `${skillBlock}\n\n${userText}` : skillBlock;
+  return {
+    ctx: { ui },
+    notifications,
+    widgetCalls,
+    autocompleteFactories,
+  };
 }
 
-// ── Fixtures ────────────────────────────────────────────────────
+function createHarness(skillCommands) {
+  const handlers = new Map();
+  const commands = new Map();
+  const metrics = { getCommandsCalls: 0 };
+  const api = {
+    on(event, handler) {
+      const eventHandlers = handlers.get(event) ?? [];
+      eventHandlers.push(handler);
+      handlers.set(event, eventHandlers);
+    },
+    registerCommand(name, options) {
+      commands.set(name, options);
+    },
+    getCommands() {
+      metrics.getCommandsCalls += 1;
+      return skillCommands;
+    },
+  };
 
-let tmpDir, d1, d2, f1, f2;
+  multiSkillsExtension(api);
+
+  return {
+    commands,
+    handlers,
+    metrics,
+    async dispatch(eventName, event, ctx) {
+      let result;
+      for (const handler of handlers.get(eventName) ?? []) {
+        const next = await handler(event, ctx);
+        if (next !== undefined) result = next;
+      }
+      return result;
+    },
+  };
+}
+
+async function startHarness(skillCommands) {
+  const harness = createHarness(skillCommands);
+  const context = createContext();
+  await harness.dispatch("session_start", { type: "session_start" }, context.ctx);
+  return { ...harness, ...context };
+}
+
+async function submit(harness, ctx, text, overrides = {}) {
+  return harness.dispatch(
+    "input",
+    {
+      type: "input",
+      text,
+      source: "interactive",
+      ...overrides,
+    },
+    ctx,
+  );
+}
+
+function requireParsedSkill(result) {
+  assert.equal(result?.action, "transform");
+  const parsed = parseSkillBlock(result.text);
+  assert.ok(parsed, "Pi's real parseSkillBlock must parse transformed output");
+  return parsed;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+let fixtureRoot;
+let skillADir;
+let skillAFile;
+let skillBDir;
+let skillBFile;
+let digitSkillDir;
+let digitSkillFile;
 
 before(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), "e2e-"));
-  d1 = join(tmpDir, "skill-a");
-  mkdirSync(d1);
-  f1 = join(d1, "SKILL.md");
-  writeFileSync(f1, `---\nname: skill-a\ndescription: First\n---\n\n${SKILL_A_CONTENT}`);
+  fixtureRoot = mkdtempSync(join(tmpdir(), "pi-multi-skills-e2e-"));
 
-  d2 = join(tmpDir, "skill-b");
-  mkdirSync(d2);
-  f2 = join(d2, "SKILL.md");
-  writeFileSync(f2, `---\nname: skill-b\ndescription: Second\n---\n\n${SKILL_B_CONTENT}`);
+  skillADir = join(fixtureRoot, "skill-a");
+  mkdirSync(skillADir);
+  skillAFile = join(skillADir, "SKILL.md");
+  writeFileSync(
+    skillAFile,
+    "---\nname: skill-a\ndescription: First skill\n---\n\n# Skill A\n\nRun `./scripts/a.js`.",
+  );
+
+  skillBDir = join(fixtureRoot, "skill-b");
+  mkdirSync(skillBDir);
+  skillBFile = join(skillBDir, "SKILL.md");
+  writeFileSync(
+    skillBFile,
+    "---\nname: skill-b\ndescription: Second skill\n---\n\n# Skill B\n\nRun `./scripts/b.js`.",
+  );
+
+  digitSkillDir = join(fixtureRoot, "3d-modeling");
+  mkdirSync(digitSkillDir);
+  digitSkillFile = join(digitSkillDir, "SKILL.md");
+  writeFileSync(
+    digitSkillFile,
+    "---\nname: 3d-modeling\ndescription: 3D skill\n---\n\n# 3D Modeling",
+  );
 });
 
-// ── Tests ────────────────────────────────────────────────────────
+after(() => {
+  rmSync(fixtureRoot, { recursive: true, force: true });
+});
 
-describe("E2E: single skill", () => {
-  it("bare $skill-a → single <skill> block", () => {
-    const r = buildSkillRegistry([skillCmd({ name: "skill-a", path: f1, baseDir: d1 })]);
-    const out = simulateExpansion("$skill-a", r);
-    assert.match(out, /^<skill name="skill-a"/);
-    assert.match(out, /Skill A/);
-    assert.doesNotMatch(out, /Skill B/);
-    assert.match(out, /skill-a$/);
-  });
+describe("Pi loader and runner E2E", () => {
+  it("loads with Jiti and transforms through Pi's real event runner", async () => {
+    const script = `
+      import { resolve } from "node:path";
+      import { parseSkillBlock } from "@earendil-works/pi-coding-agent";
+      const piEntry = import.meta.resolve("@earendil-works/pi-coding-agent");
+      const [{ loadExtensions }, { ExtensionRunner }] = await Promise.all([
+        import(new URL("./core/extensions/loader.js", piEntry)),
+        import(new URL("./core/extensions/runner.js", piEntry)),
+      ]);
+      const entryPath = resolve("index.ts");
+      const loaded = await loadExtensions([entryPath], process.cwd());
+      loaded.runtime.getCommands = () => [{
+        name: "skill:skill-a",
+        description: "First skill",
+        source: "skill",
+        sourceInfo: {
+          path: process.env.E2E_SKILL_FILE,
+          baseDir: process.env.E2E_SKILL_DIR,
+          source: "local",
+          scope: "temporary",
+          origin: "top-level",
+        },
+      }];
 
-  it("inline 'Use $skill-a' → <skill> at start + user text", () => {
-    const r = buildSkillRegistry([skillCmd({ name: "skill-a", path: f1, baseDir: d1 })]);
-    const out = simulateExpansion("Use $skill-a please", r);
-    assert.match(out, /^<skill name="skill-a"/);
-    assert.match(out, /\n\nUse skill-a please$/);
+      const uiCalls = [];
+      const ui = {
+        theme: { fg: (_color, text) => text },
+        setWidget: (...args) => uiCalls.push(["widget", ...args]),
+        addAutocompleteProvider: (factory) => uiCalls.push(["autocomplete", typeof factory]),
+        notify: (...args) => uiCalls.push(["notify", ...args]),
+      };
+      const runner = new ExtensionRunner(
+        loaded.extensions,
+        loaded.runtime,
+        process.cwd(),
+        {},
+        {},
+      );
+      runner.setUIContext(ui, "interactive");
+      await runner.emit({ type: "session_start", reason: "startup" });
+      const result = await runner.emitInput(
+        "Use $skill-a through Pi",
+        undefined,
+        "interactive",
+      );
+      const parsed = result.action === "transform"
+        ? parseSkillBlock(result.text)
+        : undefined;
+      const extension = loaded.extensions[0];
+
+      console.log(JSON.stringify({
+        coverageDirectory: process.env.NODE_V8_COVERAGE,
+        errors: loaded.errors,
+        found: Boolean(extension),
+        handlers: extension ? [...extension.handlers.keys()] : [],
+        commands: extension ? [...extension.commands.keys()] : [],
+        resultAction: result.action,
+        parsed,
+        uiCalls,
+      }));
+    `;
+    const loaderCoverageDirectory = join(fixtureRoot, "loader-coverage");
+    const childEnvironment = {
+      ...process.env,
+      E2E_SKILL_DIR: skillADir,
+      E2E_SKILL_FILE: skillAFile,
+      NODE_V8_COVERAGE: loaderCoverageDirectory,
+    };
+    delete childEnvironment.NODE_OPTIONS;
+    const { stdout } = await execFile(
+      process.execPath,
+      ["--input-type=module", "--eval", script],
+      { cwd: process.cwd(), env: childEnvironment },
+    );
+    const smoke = JSON.parse(stdout.trim().split(/\r?\n/).at(-1));
+
+    assert.equal(smoke.coverageDirectory, loaderCoverageDirectory);
+    assert.deepEqual(smoke.errors, []);
+    assert.equal(smoke.found, true);
+    assert.ok(smoke.handlers.includes("session_start"));
+    assert.ok(smoke.handlers.includes("input"));
+    assert.ok(smoke.handlers.includes("turn_end"));
+    assert.ok(smoke.commands.includes("skills"));
+    assert.ok(smoke.commands.includes("skills-search"));
+    assert.equal(smoke.resultAction, "transform");
+    assert.equal(smoke.parsed.name, "skill-a");
+    assert.equal(smoke.parsed.location, skillAFile);
+    assert.match(smoke.parsed.content, /# Skill A/);
+    assert.equal(smoke.parsed.userMessage, "Use skill-a through Pi");
+    assert.ok(smoke.uiCalls.some(
+      ([type, message]) => type === "notify" && message === "Loaded skills: $skill-a",
+    ));
   });
 });
 
-describe("E2E: multi-skill merged block", () => {
-  it("bare $skill-a $skill-b → ONE merged <skill> with both skills", () => {
-    const r = buildSkillRegistry([
-      skillCmd({ name: "skill-a", path: f1, baseDir: d1 }),
-      skillCmd({ name: "skill-b", path: f2, baseDir: d2 }),
+describe("real input handler", () => {
+  it("expands one skill into a block accepted by Pi", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
     ]);
-    const out = simulateExpansion("$skill-a $skill-b", r);
+    const result = await submit(runtime, runtime.ctx, "Use $skill-a please");
+    const parsed = requireParsedSkill(result);
 
-    // One <skill> block only
-    assert.equal(out.match(/<skill name=/g).length, 1);
-    assert.equal(out.match(/<\/skill>/g).length, 1);
-
-    // Name contains both skills
-    assert.match(out, /^<skill name="skill-a, skill-b"/);
-
-    // Both skills' content present
-    assert.match(out, /Skill A/);
-    assert.match(out, /Skill B/);
-
-    // Bare refs expanded to readable names after skill block
-    assert.match(out, /\n\nskill-a skill-b$/);
+    assert.equal(parsed.name, "skill-a");
+    assert.equal(parsed.location, skillAFile);
+    assert.match(parsed.content, /# Skill A/);
+    assert.match(parsed.content, new RegExp(`References are relative to ${escapeRegExp(skillADir)}`));
+    assert.equal(parsed.userMessage, "Use skill-a please");
   });
 
-  it("inline multi-skill → merged block + user text", () => {
-    const r = buildSkillRegistry([
-      skillCmd({ name: "skill-a", path: f1, baseDir: d1 }),
-      skillCmd({ name: "skill-b", path: f2, baseDir: d2 }),
+  it("preserves multiline Markdown, indentation, blank lines, and repeated spaces", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
     ]);
-    const out = simulateExpansion("Run $skill-a then $skill-b here", r);
+    const input = [
+      "Intro",
+      "",
+      "  ```ts",
+      "  const first = 1;",
+      "    const second = 2;",
+      "  ```",
+      "",
+      "Use  $skill-a  exactly.",
+      "",
+      "Final paragraph.",
+    ].join("\n");
+    const expectedUserMessage = input.replace("$skill-a", "skill-a");
 
-    // One merged block
-    assert.equal(out.match(/<skill name=/g).length, 1);
-
-    // Both skills present
-    assert.match(out, /Skill A/);
-    assert.match(out, /Skill B/);
-
-    // User text after \n\n
-    assert.match(out, /\n\nRun skill-a then skill-b here$/);
+    const result = await submit(runtime, runtime.ctx, input);
+    const parsed = requireParsedSkill(result);
+    assert.equal(parsed.userMessage, expectedUserMessage);
   });
 
-  it("parseSkillBlock matches merged multi-skill block", () => {
-    const r = buildSkillRegistry([
-      skillCmd({ name: "skill-a", path: f1, baseDir: d1 }),
-      skillCmd({ name: "skill-b", path: f2, baseDir: d2 }),
+  it("keeps a separate relative-reference directory for every merged skill", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+      skillCommand({ name: "skill-b", path: skillBFile, baseDir: skillBDir }),
     ]);
-    const out = simulateExpansion("$skill-a $skill-b", r);
+    const result = await submit(runtime, runtime.ctx, "Run $skill-a then $skill-b");
+    const parsed = requireParsedSkill(result);
 
-    const re = /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/;
-    const m = out.match(re);
-    assert.ok(m, "parseSkillBlock must match merged block");
-    assert.equal(m[1], "skill-a, skill-b");
-    assert.ok(m[3].includes("Skill A"));
-    assert.ok(m[3].includes("Skill B"));
-    assert.equal(m[4], "skill-a skill-b");
+    assert.equal(parsed.name, "skill-a, skill-b");
+    assert.match(parsed.content, new RegExp(`Skill file: ${escapeRegExp(skillAFile)}`));
+    assert.match(parsed.content, new RegExp(`relative to ${escapeRegExp(skillADir)}`));
+    assert.match(parsed.content, new RegExp(`Skill file: ${escapeRegExp(skillBFile)}`));
+    assert.match(parsed.content, new RegExp(`relative to ${escapeRegExp(skillBDir)}`));
+    assert.match(parsed.content, /\.\/scripts\/a\.js/);
+    assert.match(parsed.content, /\.\/scripts\/b\.js/);
+    assert.equal(parsed.userMessage, "Run skill-a then skill-b");
+    assert.equal(result.text.match(/<skill name=/g)?.length, 1);
   });
 
-  it("3 skills merged into one block", () => {
-    const d3 = join(tmpDir, "skill-c");
-    mkdirSync(d3);
-    const f3 = join(d3, "SKILL.md");
-    writeFileSync(f3, "---\nname: skill-c\ndescription: Third\n---\n\n# Skill C\nContent C");
-
-    const r = buildSkillRegistry([
-      skillCmd({ name: "skill-a", path: f1, baseDir: d1 }),
-      skillCmd({ name: "skill-b", path: f2, baseDir: d2 }),
-      skillCmd({ name: "skill-c", path: f3, baseDir: d3 }),
+  it("loads successful skills only and leaves failed references unchanged", async () => {
+    const missingFile = join(fixtureRoot, "missing", "SKILL.md");
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+      skillCommand({ name: "missing-skill", path: missingFile, baseDir: join(fixtureRoot, "missing") }),
     ]);
-    const out = simulateExpansion("use $skill-a $skill-b $skill-c here", r);
+    const result = await submit(runtime, runtime.ctx, "Use $skill-a and $missing-skill");
+    const parsed = requireParsedSkill(result);
 
-    assert.equal(out.match(/<skill name=/g).length, 1);
-    assert.match(out, /^<skill name="skill-a, skill-b, skill-c"/);
-    assert.match(out, /Skill A/);
-    assert.match(out, /Skill B/);
-    assert.match(out, /Skill C/);
-    assert.match(out, /\n\nuse skill-a skill-b skill-c here$/);
+    assert.equal(parsed.name, "skill-a");
+    assert.equal(parsed.userMessage, "Use skill-a and $missing-skill");
+    assert.equal(runtime.notifications.filter(({ level }) => level === "error").length, 1);
+    assert.match(runtime.notifications.at(-2)?.message ?? "", /Could not read skill file for \$missing-skill/);
+    assert.deepEqual(runtime.widgetCalls.at(-1)?.content, ["Skills: $skill-a"]);
+    assert.match(runtime.notifications.at(-1)?.message ?? "", /Loaded skills: \$skill-a/);
+  });
+
+  it("continues unchanged when every requested skill fails to load", async () => {
+    const missingFile = join(fixtureRoot, "missing-all", "SKILL.md");
+    const runtime = await startHarness([
+      skillCommand({ name: "missing", path: missingFile, baseDir: join(fixtureRoot, "missing-all") }),
+    ]);
+    const result = await submit(runtime, runtime.ctx, "Use $missing exactly");
+
+    assert.deepEqual(result, { action: "continue" });
+    assert.match(runtime.notifications.at(-1)?.message ?? "", /Could not read skill file for \$missing/);
+    assert.equal(runtime.widgetCalls.at(-1)?.content, undefined);
+  });
+
+  it("ignores unknown variables and skill-looking text in Markdown code", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+    ]);
+    const input = "```sh\necho $skill-a $path\n```\n\nUnknown $not-installed";
+    const result = await submit(runtime, runtime.ctx, input);
+
+    assert.deepEqual(result, { action: "continue" });
+    assert.equal(runtime.notifications.length, 0);
+  });
+
+  it("supports installed skill names beginning with a digit", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "3d-modeling", path: digitSkillFile, baseDir: digitSkillDir }),
+    ]);
+    const parsed = requireParsedSkill(
+      await submit(runtime, runtime.ctx, "Use $3d-modeling"),
+    );
+    assert.equal(parsed.name, "3d-modeling");
+    assert.equal(parsed.userMessage, "Use 3d-modeling");
+  });
+
+  it("skips extension-injected input but supports RPC and preserves images", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+    ]);
+
+    const extensionResult = await submit(runtime, runtime.ctx, "$skill-a", {
+      source: "extension",
+    });
+    assert.deepEqual(extensionResult, { action: "continue" });
+
+    const images = [{ type: "image", data: "abc", mimeType: "image/png" }];
+    const rpcResult = await submit(runtime, runtime.ctx, "RPC $skill-a", {
+      source: "rpc",
+      images,
+    });
+    assert.equal(rpcResult?.action, "transform");
+    assert.equal(rpcResult.images, images);
+  });
+
+  it("warns when aggregate skill instructions are unusually large", async () => {
+    const directory = join(fixtureRoot, "large-skill");
+    mkdirSync(directory);
+    const file = join(directory, "SKILL.md");
+    writeFileSync(
+      file,
+      `---\nname: large-skill\ndescription: Large\n---\n\n${"x".repeat(50_001)}`,
+    );
+    const runtime = await startHarness([
+      skillCommand({ name: "large-skill", path: file, baseDir: directory }),
+    ]);
+    await submit(runtime, runtime.ctx, "$large-skill");
+    assert.ok(runtime.notifications.some(
+      ({ level, message }) => level === "warning" && message.includes("50,001"),
+    ));
+  });
+
+  it("clears the transient skill widget when the turn ends", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+    ]);
+    await submit(runtime, runtime.ctx, "$skill-a");
+    assert.deepEqual(runtime.widgetCalls.at(-1)?.content, ["Skills: $skill-a"]);
+
+    await runtime.dispatch("turn_end", { type: "turn_end" }, runtime.ctx);
+    assert.equal(runtime.widgetCalls.at(-1)?.content, undefined);
   });
 });
 
-describe("E2E: edge cases", () => {
-  it("preserves text with no $ refs", () => {
-    assert.equal(simulateExpansion("hello", buildSkillRegistry([])), "hello");
+describe("real autocomplete provider and commands", () => {
+  it("uses cached metadata, ranks prefix matches, and caps results", async () => {
+    const commands = Array.from({ length: 25 }, (_, index) => skillCommand({
+      name: `code-${String(index).padStart(2, "0")}`,
+      path: join(fixtureRoot, `missing-${index}.md`),
+      baseDir: fixtureRoot,
+    }));
+    commands.push(skillCommand({
+      name: "my-code",
+      path: join(fixtureRoot, "also-missing.md"),
+      baseDir: fixtureRoot,
+    }));
+
+    const runtime = await startHarness(commands);
+    const delegateResult = { prefix: "delegate", items: [] };
+    const current = {
+      async getSuggestions() {
+        return delegateResult;
+      },
+      applyCompletion(lines, cursorLine, cursorCol) {
+        return { lines, cursorLine, cursorCol };
+      },
+      shouldTriggerFileCompletion() {
+        return true;
+      },
+    };
+    const provider = runtime.autocompleteFactories[0](current);
+    const line = "Use $code";
+    const suggestions = await provider.getSuggestions(
+      [line],
+      0,
+      line.length,
+      { signal: new AbortController().signal },
+    );
+
+    assert.equal(suggestions.items.length, 20);
+    assert.ok(suggestions.items.every(({ value }) => value.startsWith("$code-")));
+    assert.equal(suggestions.prefix, "$code");
+    assert.equal(runtime.metrics.getCommandsCalls, 1);
+
+    const embedded = "email$code";
+    assert.equal(
+      await provider.getSuggestions(
+        [embedded],
+        0,
+        embedded.length,
+        { signal: new AbortController().signal },
+      ),
+      delegateResult,
+    );
+    assert.equal(
+      await provider.getSuggestions(
+        ["```sh", "$code"],
+        1,
+        5,
+        { signal: new AbortController().signal },
+      ),
+      delegateResult,
+    );
   });
 
-  it("ignores $PATH $HOME", () => {
-    const out = simulateExpansion("$PATH and $HOME", buildSkillRegistry([]));
-    assert.equal(out, "$PATH and $HOME");
-  });
-
-  it("escaped \\$", () => {
-    const r = buildSkillRegistry([skillCmd({ name: "skill-a", path: f1, baseDir: d1 })]);
-    const out = simulateExpansion("Price \\$100, not $skill-a", r);
-    assert.match(out, /^<skill name="skill-a"/);
-    assert.match(out, /\n\nPrice \$100, not skill-a$/);
-  });
-
-  it("unknown skills keep $ as-is", () => {
-    const r = buildSkillRegistry([]);
-    assert.equal(simulateExpansion("Use $unknown", r), "Use $unknown");
-  });
-
-  it("overlapping names (longest wins)", () => {
-    const sd = mkdtempSync(join(tmpdir(), "short-"));
-    const sf = join(sd, "SKILL.md");
-    writeFileSync(sf, "---\nname: code\ndescription: C\n---\n\n# Code");
-
-    const ld = mkdtempSync(join(tmpdir(), "long-"));
-    const lf = join(ld, "SKILL.md");
-    writeFileSync(lf, "---\nname: code-review\ndescription: CR\n---\n\n# Code Review");
-
-    const r = buildSkillRegistry([
-      skillCmd({ name: "code", path: sf, baseDir: sd }),
-      skillCmd({ name: "code-review", path: lf, baseDir: ld }),
+  it("honors an aborted autocomplete request", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
     ]);
-    const out = simulateExpansion("$code-review and $code", r);
+    const current = {
+      async getSuggestions() {
+        throw new Error("delegate should not run");
+      },
+      applyCompletion(lines, cursorLine, cursorCol) {
+        return { lines, cursorLine, cursorCol };
+      },
+    };
+    const provider = runtime.autocompleteFactories[0](current);
+    const controller = new AbortController();
+    controller.abort();
+    assert.equal(
+      await provider.getSuggestions(["$"], 0, 1, { signal: controller.signal }),
+      null,
+    );
+  });
 
-    assert.equal(out.match(/<skill name=/g).length, 1);
-    assert.match(out, /Code Review/);
-    assert.match(out, /# Code/);
-    assert.match(out, /\n\ncode-review and code$/);
+  it("delegates empty autocomplete results and completion behavior", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+    ]);
+    const completion = { lines: ["completed"], cursorLine: 0, cursorCol: 9 };
+    const delegateResult = { prefix: "delegate", items: [] };
+    const current = {
+      async getSuggestions() {
+        return delegateResult;
+      },
+      applyCompletion() {
+        return completion;
+      },
+      shouldTriggerFileCompletion() {
+        return false;
+      },
+    };
+    const provider = runtime.autocompleteFactories[0](current);
+
+    assert.equal(
+      await provider.getSuggestions(
+        ["$not-found"],
+        0,
+        10,
+        { signal: new AbortController().signal },
+      ),
+      delegateResult,
+    );
+    assert.equal(provider.applyCompletion(["$s"], 0, 2, {}, "$s"), completion);
+    assert.equal(provider.shouldTriggerFileCompletion([""], 0, 0), false);
+  });
+
+  it("defaults file completion to enabled when the wrapped provider omits the hook", async () => {
+    const runtime = await startHarness([]);
+    const delegateResult = { prefix: "delegate", items: [] };
+    const current = {
+      async getSuggestions() {
+        return delegateResult;
+      },
+      applyCompletion(lines, cursorLine, cursorCol) {
+        return { lines, cursorLine, cursorCol };
+      },
+    };
+    const provider = runtime.autocompleteFactories[0](current);
+
+    assert.equal(provider.shouldTriggerFileCompletion([""], 0, 0), true);
+    assert.equal(
+      await provider.getSuggestions(
+        ["$"],
+        0,
+        1,
+        { signal: new AbortController().signal },
+      ),
+      delegateResult,
+    );
+  });
+
+  it("handles empty list/search states and plain input", async () => {
+    const runtime = await startHarness([]);
+
+    await runtime.commands.get("skills").handler("", runtime.ctx);
+    assert.deepEqual(runtime.notifications.at(-1), {
+      message: "No skills found.",
+      level: "warning",
+    });
+
+    await runtime.commands.get("skills-search").handler("   ", runtime.ctx);
+    assert.match(runtime.notifications.at(-1)?.message ?? "", /Usage:/);
+
+    await runtime.commands.get("skills-search").handler("absent", runtime.ctx);
+    assert.match(runtime.notifications.at(-1)?.message ?? "", /No skills matching/);
+
+    assert.deepEqual(
+      await submit(runtime, runtime.ctx, "plain input"),
+      { action: "continue" },
+    );
+    assert.equal(runtime.widgetCalls.at(-1)?.content, undefined);
+  });
+
+  it("lists and searches cached Pi metadata without reading skill bodies", async () => {
+    const runtime = await startHarness([
+      skillCommand({
+        name: "missing-but-listed",
+        path: join(fixtureRoot, "never-read.md"),
+        baseDir: fixtureRoot,
+        description: "Find this metadata",
+      }),
+    ]);
+
+    await runtime.commands.get("skills").handler("", runtime.ctx);
+    assert.match(runtime.notifications.at(-1)?.message ?? "", /\$missing-but-listed/);
+
+    await runtime.commands.get("skills-search").handler("  metadata  ", runtime.ctx);
+    assert.match(runtime.notifications.at(-1)?.message ?? "", /Skills matching "metadata"/);
   });
 });

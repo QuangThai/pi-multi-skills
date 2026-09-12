@@ -1,7 +1,8 @@
 {
   "name": "pi-multi-skills",
-  "version": "1.1.3",
-  "description": "Reference any installed pi skill from anywhere in your prompt using $skill_name syntax. Expands inline to <skill> XML (same format as Pi's native /skill:xxx) — no system prompt injection.",
+  "version": "1.2.0",
+  "type": "module",
+  "description": "Invoke one or more installed Pi skills anywhere in interactive or RPC prompts with $skill-name syntax and native skill-block rendering.",
   "license": "MIT",
   "keywords": [
     "pi-package",
@@ -21,25 +22,32 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --import tsx --test tests/*.test.mjs",
+    "test": "node --import tsx --test tests/all.test.mjs",
+    "test:coverage": "c8 --clean --include=*.ts --check-coverage --lines=95 --branches=90 --functions=95 --statements=95 --reporter=text node --import tsx --test tests/all.test.mjs",
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck",
-    "prepack": "npm run typecheck && npm test"
+    "verify": "npm run typecheck && npm run test:coverage",
+    "prepack": "npm run verify"
   },
   "files": [
     "index.ts",
+    "expander.ts",
     "parser.ts",
     "resolver.ts",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "RELEASING.md",
+    "LICENSE"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@types/node": "^24.0.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^24.13.4",
+    "c8": "^12.0.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3"
   },
   "pi": {
     "extensions": [

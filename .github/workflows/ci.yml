@@ -7,18 +7,50 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }} / Pi ${{ matrix.pi-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
-        node-version: ["22"]
+        include:
+          - os: ubuntu-latest
+            node-version: "22.19.0"
+            pi-version: "0.80.2"
+          - os: ubuntu-latest
+            node-version: "24"
+            pi-version: "latest"
+          - os: windows-latest
+            node-version: "22.19.0"
+            pi-version: "latest"
+          - os: windows-latest
+            node-version: "24"
+            pi-version: "latest"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node-version }}
-          registry-url: "https://registry.npmjs.org"
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Select Pi compatibility version
+        run: npm install --no-save --package-lock=false --ignore-scripts @earendil-works/pi-coding-agent@${{ matrix.pi-version }}
+      - name: Typecheck and test with coverage
+        run: npm run verify
+      - name: Verify package contents
+        run: npm pack --dry-run --ignore-scripts
+      - name: Audit production dependency surface
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '24'
+        run: npm audit --omit=dev --audit-level=high

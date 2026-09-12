@@ -1,99 +1,275 @@
 /**
- * multi-skills — Parser
+ * Parser for `$skill-name` references.
  *
- * Parses `$skill_name` references from user input text.
- * Supports:
- *   - $skill_name (standalone)
- *   - Multi-skill: "Apply $skillA and $skillB together"
- *   - Escaped: \$\ → literal $
+ * References are recognized only outside Markdown fenced/inline code. Escaped
+ * dollars (`\$`) remain literal, and callers can filter candidates against the
+ * skills that Pi has actually loaded.
  */
 
-/** Regex pattern for $skill_name references */
-// Matches $ followed by a lowercase skill name (letters, digits, underscores, hyphens)
-// Not preceded by \ (escape). Skill names are lowercase by Pi/Agent Skills convention,
-// so uppercase shell variables like $PATH and $HOME are left alone.
-const SKILL_REF_RE = /(?<!\\)\$([a-z][a-z0-9_-]*)(?![A-Za-z0-9_-])/g;
+/** Agent Skills names are lowercase letters, digits, and hyphens. Underscores
+ * remain accepted for backwards compatibility with this extension's original
+ * `$skill_name` syntax and Pi's lenient loading behavior. */
+const SKILL_NAME_START_RE = /[a-z0-9]/;
+const SKILL_NAME_CHAR_RE = /[a-z0-9_-]/;
+const TOKEN_CHAR_RE = /[\p{L}\p{N}_-]/u;
+const BOUNDARY_BLOCKER_RE = /[\p{L}\p{N}_$]/u;
 
 export interface ParsedRef {
-  raw: string;       // Full match including $, e.g. "$skillA"
-  name: string;      // Skill name without $, e.g. "skillA"
-  index: number;     // Position in original text
+  raw: string;
+  name: string;
+  index: number;
 }
 
-/**
- * Escape regex-special characters in a string.
- * Shared utility used by both parser and index.
- */
-export function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export interface SkillNameLookup {
+  has(name: string): boolean;
 }
 
-/**
- * Parse all $skill_name references from text.
- * Returns deduplicated list preserving first-occurrence order.
- */
-export function parseSkillRefs(text: string): ParsedRef[] {
-  const refs: ParsedRef[] = [];
+interface ScanResult {
+  refs: ParsedRef[];
+  escapedDollarIndexes: number[];
+}
 
-  SKILL_REF_RE.lastIndex = 0;
+interface Fence {
+  character: "`" | "~";
+  length: number;
+}
 
-  let match: RegExpExecArray | null;
-  while ((match = SKILL_REF_RE.exec(text)) !== null) {
-    refs.push({
-      raw: match[0],
-      name: match[1].toLowerCase(),
-      index: match.index,
+function countRepeatedCharacter(text: string, start: number, character: string): number {
+  let end = start;
+  while (text[end] === character) end += 1;
+  return end - start;
+}
+
+function precedingBackslashCount(text: string, index: number): number {
+  let count = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+    count += 1;
+  }
+  return count;
+}
+
+function codePointCharacterAt(text: string, index: number): string | undefined {
+  const codePoint = text.codePointAt(index);
+  return codePoint === undefined ? undefined : String.fromCodePoint(codePoint);
+}
+
+function codePointCharacterBefore(text: string, index: number): string | undefined {
+  if (index <= 0) return undefined;
+
+  let start = index - 1;
+  const trailingCodeUnit = text.charCodeAt(start);
+  if (
+    trailingCodeUnit >= 0xdc00 &&
+    trailingCodeUnit <= 0xdfff &&
+    start > 0
+  ) {
+    const leadingCodeUnit = text.charCodeAt(start - 1);
+    if (leadingCodeUnit >= 0xd800 && leadingCodeUnit <= 0xdbff) {
+      start -= 1;
+    }
+  }
+  return text.slice(start, index);
+}
+
+function scanTextLine(
+  text: string,
+  lineStart: number,
+  lineEnd: number,
+  inlineTicks: number,
+  result: ScanResult,
+): number {
+  let cursor = lineStart;
+
+  while (cursor < lineEnd) {
+    const character = text[cursor];
+
+    if (
+      character === "`" &&
+      (inlineTicks > 0 || precedingBackslashCount(text, cursor) % 2 === 0)
+    ) {
+      const tickCount = countRepeatedCharacter(text, cursor, "`");
+      if (inlineTicks === 0) {
+        inlineTicks = tickCount;
+      } else if (tickCount === inlineTicks) {
+        inlineTicks = 0;
+      }
+      cursor += tickCount;
+      continue;
+    }
+
+    if (inlineTicks > 0 || character !== "$") {
+      cursor += 1;
+      continue;
+    }
+
+    const backslashCount = precedingBackslashCount(text, cursor);
+    if (backslashCount % 2 === 1) {
+      result.escapedDollarIndexes.push(cursor - 1);
+      cursor += 1;
+      continue;
+    }
+
+    const previousCharacter = codePointCharacterBefore(text, cursor);
+    if (previousCharacter && BOUNDARY_BLOCKER_RE.test(previousCharacter)) {
+      cursor += 1;
+      continue;
+    }
+
+    const nameStart = cursor + 1;
+    const firstNameCharacter = text[nameStart];
+    if (!firstNameCharacter || !SKILL_NAME_START_RE.test(firstNameCharacter)) {
+      cursor += 1;
+      continue;
+    }
+
+    let nameEnd = nameStart + 1;
+    while (nameEnd < lineEnd) {
+      const nextCharacter = text[nameEnd];
+      if (!nextCharacter || !SKILL_NAME_CHAR_RE.test(nextCharacter)) break;
+      nameEnd += 1;
+    }
+
+    // Reject mixed-case/otherwise identifier-like suffixes instead of parsing a
+    // misleading lowercase prefix from `$skillName`.
+    const trailingCharacter = codePointCharacterAt(text, nameEnd);
+    if (trailingCharacter && TOKEN_CHAR_RE.test(trailingCharacter)) {
+      cursor = nameEnd + 1;
+      continue;
+    }
+
+    const name = text.slice(nameStart, nameEnd);
+    result.refs.push({
+      raw: text.slice(cursor, nameEnd),
+      name,
+      index: cursor,
     });
+    cursor = nameEnd;
   }
 
-  // Deduplicate by name while preserving order
+  return inlineTicks;
+}
+
+/** Scan all candidate references while ignoring Markdown code spans and fences. */
+function scanSkillRefs(text: string): ScanResult {
+  const result: ScanResult = { refs: [], escapedDollarIndexes: [] };
+  let fence: Fence | undefined;
+  let inlineTicks = 0;
+  let lineStart = 0;
+
+  while (lineStart <= text.length) {
+    const newlineIndex = text.indexOf("\n", lineStart);
+    const lineEnd = newlineIndex === -1 ? text.length : newlineIndex;
+    const line = text.slice(lineStart, lineEnd);
+    const markerMatch = line.match(/^ {0,3}(`+|~+)(.*)$/);
+    const marker = markerMatch?.[1];
+    const markerCharacter = marker?.[0];
+    const markerRemainder = markerMatch?.[2] ?? "";
+
+    if (fence) {
+      if (
+        marker &&
+        markerCharacter === fence.character &&
+        marker.length >= fence.length &&
+        markerRemainder.trim() === ""
+      ) {
+        fence = undefined;
+      }
+    } else if (
+      inlineTicks === 0 &&
+      marker &&
+      (markerCharacter === "`" || markerCharacter === "~") &&
+      marker.length >= 3 &&
+      !(markerCharacter === "`" && markerRemainder.includes("`"))
+    ) {
+      fence = { character: markerCharacter, length: marker.length };
+    } else {
+      inlineTicks = scanTextLine(text, lineStart, lineEnd, inlineTicks, result);
+    }
+
+    if (newlineIndex === -1) break;
+    lineStart = newlineIndex + 1;
+  }
+
+  return result;
+}
+
+/**
+ * Parse deduplicated references in first-occurrence order.
+ *
+ * Passing a lookup makes parsing registry-aware: only skills exposed by Pi are
+ * returned, so ordinary `$shell`/`$php` variables remain untouched.
+ */
+export function parseSkillRefs(text: string, knownSkills?: SkillNameLookup): ParsedRef[] {
+  const refs = scanSkillRefs(text).refs;
   const seen = new Set<string>();
+
   return refs.filter((ref) => {
+    if (knownSkills && !knownSkills.has(ref.name)) return false;
     if (seen.has(ref.name)) return false;
     seen.add(ref.name);
     return true;
   });
 }
 
-/**
- * Replacement entry for replaceSkillRefs.
- */
 export interface SkillReplacement {
   name: string;
   marker: string;
 }
 
+interface TextEdit {
+  start: number;
+  end: number;
+  value: string;
+}
+
 /**
- * Replace $skill_name references with markers.
- *
- * Sort by name length descending so longer names (e.g. "code-review")
- * are replaced before shorter ones (e.g. "code") to prevent partial
- * matches.
+ * Replace known skill references without normalizing any unrelated whitespace.
+ * Escaped dollars outside Markdown code are unescaped only when an invocation
+ * is actually transformed.
  */
 export function replaceSkillRefs(
   text: string,
   replacements: SkillReplacement[],
 ): string {
-  const sorted = [...replacements].sort(
-    (a, b) => b.name.length - a.name.length,
+  if (replacements.length === 0) return text;
+
+  const replacementByName = new Map(
+    replacements.map(({ name, marker }) => [name, marker]),
   );
+  const scan = scanSkillRefs(text);
+  const edits: TextEdit[] = [];
+
+  for (const ref of scan.refs) {
+    const marker = replacementByName.get(ref.name);
+    if (marker !== undefined) {
+      edits.push({ start: ref.index, end: ref.index + ref.raw.length, value: marker });
+    }
+  }
+
+  for (const escapedDollarIndex of scan.escapedDollarIndexes) {
+    edits.push({ start: escapedDollarIndex, end: escapedDollarIndex + 1, value: "" });
+  }
+
+  edits.sort((left, right) => right.start - left.start);
 
   let result = text;
-  for (const { name, marker } of sorted) {
-    result = result.replace(
-      new RegExp(`(?<!\\\\)\\$${escapeRegex(name)}(?![A-Za-z0-9_-])`, "g"),
-      marker,
-    );
+  for (const edit of edits) {
+    result = result.slice(0, edit.start) + edit.value + result.slice(edit.end);
   }
-  // Clean any remaining escaped \$
-  result = result.replace(/\\\$/g, "$");
   return result;
 }
 
-/**
- * Quick check whether text contains any $skill references.
- */
-export function hasSkillRefs(text: string): boolean {
-  SKILL_REF_RE.lastIndex = 0;
-  return SKILL_REF_RE.test(text);
+/** Return the partial name after a valid trailing `$` autocomplete trigger. */
+export function getSkillCompletionPrefix(textBeforeCursor: string): string | undefined {
+  const match = /\$([a-z0-9][a-z0-9_-]*)?$/.exec(textBeforeCursor);
+  if (!match) return undefined;
+
+  const partial = match[1] ?? "";
+  const probe = partial ? textBeforeCursor : `${textBeforeCursor}a`;
+  const expectedName = partial || "a";
+  const candidate = scanSkillRefs(probe).refs.find(
+    (ref) => ref.index === match.index && ref.name === expectedName,
+  );
+
+  return candidate ? partial : undefined;
 }

@@ -4,6 +4,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "esModuleInterop": true,
@@ -16,6 +18,7 @@
   },
   "include": [
     "index.ts",
+    "expander.ts",
     "parser.ts",
     "resolver.ts"
   ],
