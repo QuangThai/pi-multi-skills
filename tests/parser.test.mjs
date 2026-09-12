@@ -99,13 +99,25 @@ describe("replaceSkillRefs", () => {
     assert.equal(result, "`$code-review`\n\n```sh\n$code-review\n```\n\nUse code-review");
   });
 
-  it("unescapes literal dollars outside code only when a transform occurs", () => {
-    const input = "Price \\$100, use $skill; keep `\\$inside`";
+  it("unescapes only escaped references matching a transformed skill", () => {
+    const input = "Price \\$100, path C:\\$Recycle.Bin, use $skill; literal \\$skill; keep `\\$inside`";
     assert.equal(
       replaceSkillRefs(input, [{ name: "skill", marker: "skill" }]),
-      "Price $100, use skill; keep `\\$inside`",
+      "Price \\$100, path C:\\$Recycle.Bin, use skill; literal $skill; keep `\\$inside`",
     );
     assert.equal(replaceSkillRefs("\\$skill", []), "\\$skill");
+  });
+
+  it("supports context-sensitive occurrence markers", () => {
+    const result = replaceSkillRefs("$skill and `code`$skill", [
+      {
+        name: "skill",
+        marker: (reference, source) => source[reference.index - 1] === "`"
+          ? reference.raw
+          : `<${reference.raw}>`,
+      },
+    ]);
+    assert.equal(result, "<$skill> and `code`$skill");
   });
 
   it("leaves unknown and mixed-case references untouched", () => {

@@ -9,8 +9,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
-import { parseSkillBlock } from "@earendil-works/pi-coding-agent";
+import { promisify, stripVTControlCharacters } from "node:util";
+import {
+  getMarkdownTheme,
+  initTheme,
+  parseSkillBlock,
+  UserMessageComponent,
+} from "@earendil-works/pi-coding-agent";
 import multiSkillsExtension from "../index.ts";
 
 const execFile = promisify(execFileCallback);
@@ -127,6 +132,11 @@ function requireParsedSkill(result) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderUserMarkdown(markdown, themeName) {
+  initTheme(themeName);
+  return new UserMessageComponent(markdown, getMarkdownTheme(), 1).render(120).join("\n");
 }
 
 let fixtureRoot;
@@ -258,7 +268,7 @@ describe("Pi loader and runner E2E", () => {
     assert.equal(smoke.parsed.name, "skill-a");
     assert.equal(smoke.parsed.location, skillAFile);
     assert.match(smoke.parsed.content, /# Skill A/);
-    assert.equal(smoke.parsed.userMessage, "Use skill-a through Pi");
+    assert.equal(smoke.parsed.userMessage, "Use `$skill-a` through Pi");
     assert.ok(smoke.uiCalls.some(
       ([type, message]) => type === "notify" && message === "Loaded skills: $skill-a",
     ));
@@ -277,7 +287,93 @@ describe("real input handler", () => {
     assert.equal(parsed.location, skillAFile);
     assert.match(parsed.content, /# Skill A/);
     assert.match(parsed.content, new RegExp(`References are relative to ${escapeRegExp(skillADir)}`));
-    assert.equal(parsed.userMessage, "Use skill-a please");
+    assert.equal(parsed.userMessage, "Use `$skill-a` please");
+  });
+
+  it("renders successful mentions with Pi's theme accent", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+    ]);
+    const parsed = requireParsedSkill(
+      await submit(runtime, runtime.ctx, "Use $skill-a twice: $skill-a"),
+    );
+
+    assert.equal(parsed.userMessage, "Use `$skill-a` twice: `$skill-a`");
+    for (const themeName of ["dark", "light"]) {
+      const rendered = renderUserMarkdown(parsed.userMessage, themeName);
+      const accentMention = getMarkdownTheme().code("$skill-a");
+      assert.notEqual(accentMention, "$skill-a");
+      assert.equal(rendered.split(accentMention).length - 1, 2);
+
+      const visible = stripVTControlCharacters(rendered);
+      assert.match(visible, /Use \$skill-a twice: \$skill-a/);
+      assert.doesNotMatch(visible, /`/);
+    }
+  });
+
+  it("keeps escaped and code-adjacent mentions visually unstyled", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+    ]);
+    const parsed = requireParsedSkill(
+      await submit(
+        runtime,
+        runtime.ctx,
+        "Use $skill-a; literal \\$skill-a; adjacent `code`$skill-a",
+      ),
+    );
+
+    assert.equal(
+      parsed.userMessage,
+      "Use `$skill-a`; literal $skill-a; adjacent `code`$skill-a",
+    );
+    const rendered = renderUserMarkdown(parsed.userMessage, "dark");
+    assert.equal(rendered.split(getMarkdownTheme().code("$skill-a")).length - 1, 1);
+    assert.match(
+      stripVTControlCharacters(rendered),
+      /Use \$skill-a; literal \$skill-a; adjacent code\$skill-a/,
+    );
+  });
+
+  it("does not inject code markers into Markdown links, URLs, or paths", async () => {
+    const runtime = await startHarness([
+      skillCommand({ name: "skill-a", path: skillAFile, baseDir: skillADir }),
+    ]);
+    const input = [
+      "Label [$skill-a](https://example.test)",
+      "Destination [docs](https://example.test/$skill-a)",
+      "Nested destination [docs](https://example.test/(v1)/$skill-a)",
+      "Autolink <https://example.test/$skill-a> then $skill-a",
+      "Plain URL https://example.test/?skill=$skill-a",
+      "Scheme mailto:$skill-a@example.test",
+      "Relative path ./docs/$skill-a",
+      "Path suffix $skill-a/docs",
+      "Host suffix $skill-a.example.test",
+      "Reference label [docs][$skill-a]",
+      "[skill-doc]: ./$skill-a",
+      "Comparison x < y then $skill-a",
+      "Normal $skill-a",
+    ].join("\n");
+    const expectedUserMessage = [
+      "Label [$skill-a](https://example.test)",
+      "Destination [docs](https://example.test/$skill-a)",
+      "Nested destination [docs](https://example.test/(v1)/$skill-a)",
+      "Autolink <https://example.test/$skill-a> then `$skill-a`",
+      "Plain URL https://example.test/?skill=$skill-a",
+      "Scheme mailto:$skill-a@example.test",
+      "Relative path ./docs/$skill-a",
+      "Path suffix $skill-a/docs",
+      "Host suffix $skill-a.example.test",
+      "Reference label [docs][$skill-a]",
+      "[skill-doc]: ./$skill-a",
+      "Comparison x < y then `$skill-a`",
+      "Normal `$skill-a`",
+    ].join("\n");
+
+    const parsed = requireParsedSkill(await submit(runtime, runtime.ctx, input));
+    assert.equal(parsed.userMessage, expectedUserMessage);
+    const rendered = renderUserMarkdown(parsed.userMessage, "dark");
+    assert.equal(rendered.split(getMarkdownTheme().code("$skill-a")).length - 1, 3);
   });
 
   it("preserves multiline Markdown, indentation, blank lines, and repeated spaces", async () => {
@@ -296,7 +392,7 @@ describe("real input handler", () => {
       "",
       "Final paragraph.",
     ].join("\n");
-    const expectedUserMessage = input.replace("$skill-a", "skill-a");
+    const expectedUserMessage = input.replace("$skill-a", "`$skill-a`");
 
     const result = await submit(runtime, runtime.ctx, input);
     const parsed = requireParsedSkill(result);
@@ -318,7 +414,7 @@ describe("real input handler", () => {
     assert.match(parsed.content, new RegExp(`relative to ${escapeRegExp(skillBDir)}`));
     assert.match(parsed.content, /\.\/scripts\/a\.js/);
     assert.match(parsed.content, /\.\/scripts\/b\.js/);
-    assert.equal(parsed.userMessage, "Run skill-a then skill-b");
+    assert.equal(parsed.userMessage, "Run `$skill-a` then `$skill-b`");
     assert.equal(result.text.match(/<skill name=/g)?.length, 1);
   });
 
@@ -332,7 +428,10 @@ describe("real input handler", () => {
     const parsed = requireParsedSkill(result);
 
     assert.equal(parsed.name, "skill-a");
-    assert.equal(parsed.userMessage, "Use skill-a and $missing-skill");
+    assert.equal(parsed.userMessage, "Use `$skill-a` and $missing-skill");
+    const rendered = renderUserMarkdown(parsed.userMessage, "dark");
+    assert.ok(rendered.includes(getMarkdownTheme().code("$skill-a")));
+    assert.ok(!rendered.includes(getMarkdownTheme().code("$missing-skill")));
     assert.equal(runtime.notifications.filter(({ level }) => level === "error").length, 1);
     assert.match(runtime.notifications.at(-2)?.message ?? "", /Could not read skill file for \$missing-skill/);
     assert.deepEqual(runtime.widgetCalls.at(-1)?.content, ["Skills: $skill-a"]);
@@ -370,7 +469,7 @@ describe("real input handler", () => {
       await submit(runtime, runtime.ctx, "Use $3d-modeling"),
     );
     assert.equal(parsed.name, "3d-modeling");
-    assert.equal(parsed.userMessage, "Use 3d-modeling");
+    assert.equal(parsed.userMessage, "Use `$3d-modeling`");
   });
 
   it("skips extension-injected input but supports RPC and preserves images", async () => {

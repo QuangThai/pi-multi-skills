@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.1] - 2026-09-12
+
+### Fixed
+
+- Keep the `$` sigil visible after submission and render successfully loaded skill mentions with Pi's theme-native `mdCode` accent color.
+- Leave failed and escaped references visually unstyled so the transcript does not imply that they loaded successfully.
+- Avoid introducing code markers that would alter existing inline-code spans, Markdown links, autolinks, URLs, or path-like tokens.
+- Preserve unrelated escaped dollars in prices, shell text, and Windows paths when another skill reference is transformed.
+
+### Changed
+
+- Replace the duplicate gallery assets with one accurate 1200×630 package preview and point Pi package metadata to it.
+
+### Quality
+
+- Exercise Pi's real `UserMessageComponent` with built-in dark and light themes and verify repeated, escaped, failed, URL/path, and Markdown-adjacent mention rendering.
+
 ## [1.2.0] - 2026-09-12
 
 ### Fixed
@@ -28,4 +45,5 @@ All notable changes to this project are documented here.
 - Test Node 22.19/24, Windows/Linux, and Pi 0.80.2/0.85.1 in CI.
 - Pin GitHub Actions revisions, add MIT license text, and document a manual npm release checklist.
 
+[1.2.1]: https://github.com/QuangThai/pi-multi-skills/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/QuangThai/pi-multi-skills/compare/v1.1.3...v1.2.0

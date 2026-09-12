@@ -5,7 +5,7 @@
 
 import { stripFrontmatter } from "@earendil-works/pi-coding-agent";
 import { readFile } from "node:fs/promises";
-import { parseSkillRefs, replaceSkillRefs } from "./parser";
+import { parseSkillRefs, replaceSkillRefs, type ParsedRef } from "./parser";
 import type { SkillInfo } from "./resolver";
 
 export interface SkillLoadFailure {
@@ -92,11 +92,94 @@ function formatSkillBlock(skillData: SkillData[]): string {
   return formatMergedSkills(skillData);
 }
 
+function isEscapedCharacter(source: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && source[cursor] === "\\"; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+/** Avoid adding code delimiters inside Markdown metadata or URL/path tokens. */
+function isUnsafeMentionContext(reference: ParsedRef, source: string): boolean {
+  const lineStart = source.lastIndexOf("\n", reference.index - 1) + 1;
+  let squareDepth = 0;
+  let linkDestinationDepth = 0;
+  let insideAngleBrackets = false;
+
+  for (let cursor = lineStart; cursor < reference.index; cursor += 1) {
+    if (isEscapedCharacter(source, cursor)) continue;
+    const character = source[cursor];
+
+    if (linkDestinationDepth > 0) {
+      if (character === "(") linkDestinationDepth += 1;
+      else if (character === ")") linkDestinationDepth -= 1;
+      continue;
+    }
+
+    if (character === "]" && source[cursor + 1] === "(") {
+      if (squareDepth > 0) squareDepth -= 1;
+      linkDestinationDepth = 1;
+      cursor += 1;
+    } else if (character === "[") {
+      squareDepth += 1;
+    } else if (character === "]" && squareDepth > 0) {
+      squareDepth -= 1;
+    } else if (character === "<") {
+      insideAngleBrackets = true;
+    } else if (character === ">") {
+      insideAngleBrackets = false;
+    }
+  }
+
+  const lineEndIndex = source.indexOf("\n", reference.index);
+  const lineEnd = lineEndIndex === -1 ? source.length : lineEndIndex;
+  const closingSquareBracket = source.indexOf("]", reference.index);
+  const insideDelimitedSquare = squareDepth > 0 &&
+    closingSquareBracket !== -1 &&
+    closingSquareBracket < lineEnd;
+  const closingAngleBracket = source.indexOf(">", reference.index);
+  const insideDelimitedAngle = insideAngleBrackets &&
+    closingAngleBracket !== -1 &&
+    closingAngleBracket < lineEnd;
+  if (insideDelimitedSquare || linkDestinationDepth > 0 || insideDelimitedAngle) {
+    return true;
+  }
+
+  const linePrefix = source.slice(lineStart, reference.index);
+  if (/^ {0,3}\[[^\]\n]+\]:/.test(linePrefix)) return true;
+
+  let tokenStart = reference.index;
+  while (tokenStart > lineStart && !/[\s\[\]()<>"']/.test(source[tokenStart - 1] ?? "")) {
+    tokenStart -= 1;
+  }
+  const tokenPrefix = source.slice(tokenStart, reference.index);
+  const afterReference = reference.index + reference.raw.length;
+  const tokenSuffix = source.slice(afterReference);
+  return /[\\/@]/.test(tokenPrefix) ||
+    /^[a-z][a-z0-9+.-]*:/i.test(tokenPrefix) ||
+    /^[\\/@?#=&]/.test(tokenSuffix) ||
+    /^\.[a-z0-9]/i.test(tokenSuffix);
+}
+
+/**
+ * Inline code uses Pi's theme-aware `mdCode`/accent color. Keep the original
+ * mention unchanged where adding backticks could alter existing Markdown.
+ */
+function formatSkillMention(reference: ParsedRef, source: string): string {
+  const afterReference = reference.index + reference.raw.length;
+  return source[reference.index - 1] === "`" ||
+      source[afterReference] === "`" ||
+      isUnsafeMentionContext(reference, source)
+    ? reference.raw
+    : `\`${reference.raw}\``;
+}
+
 /**
  * Expand every installed `$skill-name` reference in a message.
  *
  * - User formatting is preserved byte-for-byte apart from successful
- *   reference substitutions and explicit `\$` unescaping.
+ *   reference substitutions and matching escaped-reference unescaping.
  * - File failures leave that reference untouched.
  * - Multiple skills retain independent relative-reference directories.
  */
@@ -140,7 +223,7 @@ export async function expandSkillReferences(
   const loaded = skillData.map(({ skill }) => skill);
   const userText = replaceSkillRefs(
     text,
-    loaded.map((skill) => ({ name: skill.name, marker: skill.name })),
+    loaded.map((skill) => ({ name: skill.name, marker: formatSkillMention })),
   );
   const skillBlock = formatSkillBlock(skillData);
 

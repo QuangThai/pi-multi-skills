@@ -24,9 +24,13 @@ export interface SkillNameLookup {
   has(name: string): boolean;
 }
 
+interface EscapedRef extends ParsedRef {
+  escapeIndex: number;
+}
+
 interface ScanResult {
   refs: ParsedRef[];
-  escapedDollarIndexes: number[];
+  escapedRefs: EscapedRef[];
 }
 
 interface Fence {
@@ -103,14 +107,9 @@ function scanTextLine(
     }
 
     const backslashCount = precedingBackslashCount(text, cursor);
-    if (backslashCount % 2 === 1) {
-      result.escapedDollarIndexes.push(cursor - 1);
-      cursor += 1;
-      continue;
-    }
-
+    const escaped = backslashCount % 2 === 1;
     const previousCharacter = codePointCharacterBefore(text, cursor);
-    if (previousCharacter && BOUNDARY_BLOCKER_RE.test(previousCharacter)) {
+    if (!escaped && previousCharacter && BOUNDARY_BLOCKER_RE.test(previousCharacter)) {
       cursor += 1;
       continue;
     }
@@ -138,11 +137,16 @@ function scanTextLine(
     }
 
     const name = text.slice(nameStart, nameEnd);
-    result.refs.push({
+    const reference = {
       raw: text.slice(cursor, nameEnd),
       name,
       index: cursor,
-    });
+    };
+    if (escaped) {
+      result.escapedRefs.push({ ...reference, escapeIndex: cursor - 1 });
+    } else {
+      result.refs.push(reference);
+    }
     cursor = nameEnd;
   }
 
@@ -151,7 +155,7 @@ function scanTextLine(
 
 /** Scan all candidate references while ignoring Markdown code spans and fences. */
 function scanSkillRefs(text: string): ScanResult {
-  const result: ScanResult = { refs: [], escapedDollarIndexes: [] };
+  const result: ScanResult = { refs: [], escapedRefs: [] };
   let fence: Fence | undefined;
   let inlineTicks = 0;
   let lineStart = 0;
@@ -213,7 +217,8 @@ export function parseSkillRefs(text: string, knownSkills?: SkillNameLookup): Par
 
 export interface SkillReplacement {
   name: string;
-  marker: string;
+  /** Static replacement or a formatter for context-sensitive occurrences. */
+  marker: string | ((reference: ParsedRef, source: string) => string);
 }
 
 interface TextEdit {
@@ -224,8 +229,8 @@ interface TextEdit {
 
 /**
  * Replace known skill references without normalizing any unrelated whitespace.
- * Escaped dollars outside Markdown code are unescaped only when an invocation
- * is actually transformed.
+ * An escaped reference is unescaped only when its skill name also has a
+ * replacement, preserving unrelated shell variables, prices, and paths.
  */
 export function replaceSkillRefs(
   text: string,
@@ -242,12 +247,15 @@ export function replaceSkillRefs(
   for (const ref of scan.refs) {
     const marker = replacementByName.get(ref.name);
     if (marker !== undefined) {
-      edits.push({ start: ref.index, end: ref.index + ref.raw.length, value: marker });
+      const value = typeof marker === "function" ? marker(ref, text) : marker;
+      edits.push({ start: ref.index, end: ref.index + ref.raw.length, value });
     }
   }
 
-  for (const escapedDollarIndex of scan.escapedDollarIndexes) {
-    edits.push({ start: escapedDollarIndex, end: escapedDollarIndex + 1, value: "" });
+  for (const escapedRef of scan.escapedRefs) {
+    if (replacementByName.has(escapedRef.name)) {
+      edits.push({ start: escapedRef.escapeIndex, end: escapedRef.escapeIndex + 1, value: "" });
+    }
   }
 
   edits.sort((left, right) => right.start - left.start);

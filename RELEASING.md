@@ -25,7 +25,8 @@ Publishing is intentionally manual and runs from a maintainer's machine. The rep
 4. Commit the release, then create a tag matching the package version exactly:
 
    ```bash
-   git tag -a v1.2.0 -m "v1.2.0"
+   VERSION=$(node -p "require('./package.json').version")
+   git tag -a "v$VERSION" -m "v$VERSION"
    ```
 
 5. Push the commit and tag, and wait for CI on the tag to pass.

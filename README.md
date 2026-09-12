@@ -27,7 +27,7 @@ pi install npm:pi-multi-skills
 From a reproducible GitHub release:
 
 ```bash
-pi install git:github.com/QuangThai/pi-multi-skills@v1.2.0
+pi install git:github.com/QuangThai/pi-multi-skills@v1.2.1
 ```
 
 Reload Pi and verify discovery:
@@ -50,6 +50,8 @@ A bare invocation also works:
 ```text
 $interview-me
 ```
+
+After submission, each successfully loaded `$skill-name` stays visible with its `$` sigil and uses Pi's theme accent color. Failed references remain unstyled and are accompanied by an error notification, so the transcript does not imply that they loaded successfully.
 
 Names beginning with a digit are supported when Pi has loaded that skill:
 
@@ -74,7 +76,7 @@ Apply $code- [Tab]
 
 - Inline code and fenced code are not scanned: `` `$code-review` `` stays unchanged.
 - Prefix a dollar with `\` when an installed skill name should remain literal: `\$code-review`.
-- Unknown names and ordinary variables such as `$PATH`, `$100`, or `$not-installed` remain unchanged.
+- Unknown names and ordinary variables such as `$PATH`, `$100`, or `$not-installed` remain unchanged; their preceding backslashes are also preserved when another skill is invoked.
 - Outside Markdown code, an exact lowercase match to an installed skill is intentionally treated as an invocation; escape it when writing shell/PHP text without a code fence.
 - Messages injected by another extension are not transformed. Interactive and RPC input are supported.
 
@@ -91,7 +93,7 @@ Apply $code- [Tab]
 |---|---|---|
 | 1 | `resolver.ts` | Builds a cached, filesystem-free registry from Pi's loaded `/skill:name` commands |
 | 2 | `parser.ts` | Finds installed references outside Markdown code while preserving token boundaries and escapes |
-| 3 | `expander.ts` | Lazily reads only requested skill files and preserves the original user formatting |
+| 3 | `expander.ts` | Lazily reads only requested skill files, preserves surrounding formatting, and marks successful mentions for theme-aware rendering |
 | 4 | `index.ts` | Handles Pi input, commands, notifications, widgets, and autocomplete |
 
 A single reference uses Pi's native structural format:
@@ -105,6 +107,8 @@ References are relative to /path/to/code-review.
 ```
 
 Pi's compact renderer currently recognizes one leading `<skill>` wrapper. Multiple references are therefore placed in one compatible wrapper, with every section carrying its own skill file and relative-reference directory. A failure to read one skill leaves that `$reference` untouched while successfully loaded skills still run.
+
+Successful references in the visible user-message portion are represented as inline-code Markdown, which Pi renders through its `mdCode` theme token (`accent` in the built-in dark and light themes). The backticks are not displayed. This avoids hard-coded terminal colors, keeps `$` as a non-color cue, and works across the tested Pi versions. A mention remains unstyled when adding code delimiters would alter surrounding Markdown metadata, a URL/path token, or an adjacent code span.
 
 The extension warns when combined skill bodies exceed 50,000 characters so an accidental invocation does not silently consume excessive model context.
 
@@ -133,7 +137,7 @@ The E2E suite:
 - Executes the real extension factory and registered input handler
 - Parses transformed output with Pi's exported `parseSkillBlock`
 - Loads `index.ts` through Pi's real Jiti loader and transforms input through Pi's real `ExtensionRunner` in a subprocess
-- Covers multiline formatting, independent multi-skill roots, partial file failures, RPC images, autocomplete delegation/capping, and transient UI state
+- Covers multiline formatting, independent multi-skill roots, partial file failures, RPC images, autocomplete delegation/capping, transient UI state, Markdown/URL safety, and real dark/light Pi user-message rendering
 
 CI verifies Node 22.19 and Node 24 on Linux and Windows, including the minimum tested Pi 0.80.2 and Pi's latest release. See [CHANGELOG.md](CHANGELOG.md) for release notes and [RELEASING.md](RELEASING.md) for the manual maintainer release checklist.
 
