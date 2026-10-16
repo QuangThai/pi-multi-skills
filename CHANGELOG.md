@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.2] - 2026-10-16
+
+### Changed
+
+- Bump the development dependency to Pi 1.3.0, which clears the dev-only `npm audit` findings from transitive dependencies.
+- Stop hard-coding a "latest tested" Pi version in the README; CI covers the minimum supported release (0.80.2) and the latest published release.
+- Run CI weekly and on manual dispatch so the latest Pi release is tested continuously, not only on pushes, and keep scheduled runs in their own concurrency group so they do not cancel pushes to `main`.
+
 ## [1.2.1] - 2026-09-12
 
 ### Fixed
@@ -45,5 +53,6 @@ All notable changes to this project are documented here.
 - Test Node 22.19/24, Windows/Linux, and Pi 0.80.2/0.85.1 in CI.
 - Pin GitHub Actions revisions, add MIT license text, and document a manual npm release checklist.
 
+[1.2.2]: https://github.com/QuangThai/pi-multi-skills/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/QuangThai/pi-multi-skills/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/QuangThai/pi-multi-skills/compare/v1.1.3...v1.2.0

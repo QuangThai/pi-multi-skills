@@ -14,7 +14,7 @@ The extension reuses the skills Pi has already loaded, so project trust, package
 ## Requirements
 
 - Node.js 22.19 or newer
-- Pi with custom autocomplete triggers (tested against Pi 0.80.2 and the current latest release, 0.85.1)
+- Pi with custom autocomplete triggers. CI tests the minimum supported release (0.80.2) and the latest published release.
 
 ## Install
 
@@ -27,7 +27,7 @@ pi install npm:pi-multi-skills
 From a reproducible GitHub release:
 
 ```bash
-pi install git:github.com/QuangThai/pi-multi-skills@v1.2.1
+pi install git:github.com/QuangThai/pi-multi-skills@v1.2.2
 ```
 
 Reload Pi and verify discovery:
@@ -139,7 +139,7 @@ The E2E suite:
 - Loads `index.ts` through Pi's real Jiti loader and transforms input through Pi's real `ExtensionRunner` in a subprocess
 - Covers multiline formatting, independent multi-skill roots, partial file failures, RPC images, autocomplete delegation/capping, transient UI state, Markdown/URL safety, and real dark/light Pi user-message rendering
 
-CI verifies Node 22.19 and Node 24 on Linux and Windows, including the minimum tested Pi 0.80.2 and Pi's latest release. See [CHANGELOG.md](CHANGELOG.md) for release notes and [RELEASING.md](RELEASING.md) for the manual maintainer release checklist.
+CI verifies Node 22.19 and Node 24 on Linux and Windows, against the minimum supported Pi release (0.80.2) and the latest published Pi release. See [CHANGELOG.md](CHANGELOG.md) for release notes and [RELEASING.md](RELEASING.md) for the manual maintainer release checklist.
 
 ## Security model
 
