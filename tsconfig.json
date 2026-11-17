@@ -19,6 +19,7 @@
   "include": [
     "index.ts",
     "expander.ts",
+    "history.ts",
     "parser.ts",
     "resolver.ts"
   ],

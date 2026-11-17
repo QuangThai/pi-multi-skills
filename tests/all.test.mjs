@@ -3,3 +3,5 @@
 import "./parser.test.mjs";
 import "./resolver.test.mjs";
 import "./e2e.test.mjs";
+import "./history.test.mjs";
+import "./session.test.mjs";

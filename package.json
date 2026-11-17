@@ -32,6 +32,7 @@
   "files": [
     "index.ts",
     "expander.ts",
+    "history.ts",
     "parser.ts",
     "resolver.ts",
     "README.md",
@@ -40,7 +41,7 @@
     "LICENSE"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=1.3.0"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^1.3.0",
