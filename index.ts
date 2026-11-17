@@ -7,6 +7,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { expandSkillReferences } from "./expander";
+import { registerPromptHistory } from "./history";
 import { getSkillCompletionPrefix } from "./parser";
 import {
   buildSkillRegistry,
@@ -42,6 +43,7 @@ function rankAutocompleteSkills(
 }
 
 export default function multiSkillsExtension(pi: ExtensionAPI): void {
+  const rememberPrompt = registerPromptHistory(pi);
   let cachedRegistry: Map<string, SkillInfo> | undefined;
 
   const refreshRegistry = (): Map<string, SkillInfo> => {
@@ -198,9 +200,10 @@ export default function multiSkillsExtension(pi: ExtensionAPI): void {
       );
     }
 
+    const text = rememberPrompt(event.text, expansion.text);
     return event.images
-      ? { action: "transform", text: expansion.text, images: event.images }
-      : { action: "transform", text: expansion.text };
+      ? { action: "transform", text, images: event.images }
+      : { action: "transform", text };
   });
 
   pi.on("turn_end", (_event, ctx) => {
